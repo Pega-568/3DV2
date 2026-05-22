@@ -1,0 +1,29 @@
+{
+  "external_engines": [
+    {
+      "engine_id": "triposr_clean",
+      "enabled": false,
+      "mode": "manual_zip_worker",
+      "entrypoint": "notebooks/HY3D_worker_colab.ipynb",
+      "notes": "MVP path for Colab or Kaggle manual execution."
+    },
+    {
+      "engine_id": "instantmesh_future",
+      "enabled": false,
+      "mode": "future",
+      "notes": "Reserved for future external worker integration."
+    },
+    {
+      "engine_id": "huggingface_future",
+      "enabled": false,
+      "mode": "future",
+      "notes": "No token or endpoint is required in the MVP."
+    },
+    {
+      "engine_id": "modal_future",
+      "enabled": false,
+      "mode": "future",
+      "notes": "Reserved for future serverless GPU execution."
+    }
+  ]
+}

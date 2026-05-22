@@ -1,0 +1,18 @@
+{
+    "source_image":  "E:\\3DV4\\hy3d_v2\\test_assets\\real_smoke_input.png",
+    "result_package_version":  1,
+    "engine_id":  "triposr_local_cpu",
+    "root_candidate_path":  "model.glb",
+    "candidate_path":  "engine_output/model.glb",
+    "duration_seconds":  73.04,
+    "status":  "completed",
+    "runtime":  "local_cpu",
+    "job_id":  "job_test",
+    "version_id":  "v1",
+    "output_files":  {
+                         "root_model_glb":  "model.glb",
+                         "engine_output_model_glb":  "engine_output/model.glb",
+                         "engine_log":  "logs/engine_log.txt"
+                     },
+    "generated_at":  "2026-05-21T13:46:05.4563537-05:00"
+}

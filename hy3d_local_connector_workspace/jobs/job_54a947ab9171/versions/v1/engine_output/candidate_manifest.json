@@ -1,0 +1,15 @@
+{
+  "job_id": "job_54a947ab9171",
+  "version_id": "v1",
+  "candidate_path": "E:\\3DV4\\hy3d_local_connector_workspace\\jobs\\job_54a947ab9171\\versions\\v1\\engine_output\\model.glb",
+  "imported_at": "2026-05-22T14:19:01+00:00",
+  "validation_status": "needs_human_review",
+  "result_manifest_path": "E:\\3DV4\\hy3d_local_connector_workspace\\jobs\\job_54a947ab9171\\versions\\v1\\engine_output\\result_manifest.json",
+  "result_manifest_version": 1,
+  "extracted_files": [
+    "E:\\3DV4\\hy3d_local_connector_workspace\\jobs\\job_54a947ab9171\\versions\\v1\\engine_output\\engine_output\\model.glb",
+    "E:\\3DV4\\hy3d_local_connector_workspace\\jobs\\job_54a947ab9171\\versions\\v1\\engine_output\\logs\\engine_log.txt",
+    "E:\\3DV4\\hy3d_local_connector_workspace\\jobs\\job_54a947ab9171\\versions\\v1\\engine_output\\model.glb",
+    "E:\\3DV4\\hy3d_local_connector_workspace\\jobs\\job_54a947ab9171\\versions\\v1\\engine_output\\result_manifest.json"
+  ]
+}
