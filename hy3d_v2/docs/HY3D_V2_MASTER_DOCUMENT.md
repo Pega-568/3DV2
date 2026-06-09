@@ -1415,3 +1415,22 @@ Estado honesto del smoke reforzado:
     Motivo: cubrir reportes, degradación opcional, manifest y bloqueo STL desde candidatos.
   - `hy3d_v2/tests/test_local_connector_addon.py`
     Motivo: cubrir helpers/rutas del add-on para variantes reparadas.
+
+## Fase 2 - Smoke Blender y limpieza de escena
+
+- Estado: parcialmente implementado fuera de Blender; smoke manual pendiente.
+- Bloqueo del smoke manual: Blender no estaba disponible en `PATH` durante esta fase, por lo que no se pudo ejecutar el flujo UI real desde esta máquina.
+- Botón agregado al add-on local:
+  - `Clear HY3D Objects From Scene`
+- Regla implementada:
+  - elimina únicamente objetos que tengan `hy3d_job_id` y `hy3d_role` en `candidate` o `accepted`.
+  - no elimina objetos externos del usuario.
+- Metadata respetada:
+  - candidatos importados: `hy3d_role = candidate`, `hy3d_candidate_type = original/light/meshfix/meshlab`, `hy3d_source_path`, `hy3d_job_id`.
+  - accepted: `hy3d_role = accepted`, `hy3d_source_path`, `hy3d_job_id`.
+- Pruebas realizadas:
+  - `python -m pytest hy3d_v2/tests -q` -> pendiente de la verificación final de esta fase.
+- Pendiente manual:
+  - abrir Blender con el add-on instalado.
+  - ejecutar el smoke completo desde `Self Check` hasta `Open Exports Folder`.
+  - confirmar visualmente que no hay contaminación por objetos de jobs anteriores.

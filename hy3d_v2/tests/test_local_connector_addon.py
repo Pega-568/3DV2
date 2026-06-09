@@ -113,6 +113,23 @@ def test_local_connector_no_stl_without_accepted() -> None:
     assert hy3d_local_connector._stl_export_ready(props) is False
 
 
+class FakeBlenderObject(dict):
+    pass
+
+
+def test_local_connector_identifies_only_hy3d_scene_objects() -> None:
+    assert hy3d_local_connector._is_hy3d_scene_object(
+        FakeBlenderObject(hy3d_job_id="job_test", hy3d_role="candidate")
+    ) is True
+    assert hy3d_local_connector._is_hy3d_scene_object(
+        FakeBlenderObject(hy3d_job_id="job_test", hy3d_role="accepted")
+    ) is True
+    assert hy3d_local_connector._is_hy3d_scene_object(
+        FakeBlenderObject(hy3d_job_id="job_test", hy3d_role="external")
+    ) is False
+    assert hy3d_local_connector._is_hy3d_scene_object(FakeBlenderObject(name="UserCube")) is False
+
+
 def test_local_connector_engine_generated_state_writes_status(tmp_path: Path) -> None:
     props = SimpleNamespace(
         engine_job_id="",

@@ -465,6 +465,13 @@ def _find_imported_object(job_id: str, role: str):
     return None
 
 
+def _is_hy3d_scene_object(obj) -> bool:
+    try:
+        return bool(obj.get("hy3d_job_id") and obj.get("hy3d_role") in {"candidate", "accepted"})
+    except Exception:
+        return False
+
+
 def _import_result_package_into_session(props, package_path: Path) -> dict:
     manifest = import_result_package(workspace_root(), props.job_id, package_path, version_id=props.version_id or "v1")
     props.result_package_path = str(package_path)
@@ -582,6 +589,21 @@ if BLENDER_AVAILABLE:  # pragma: no branch
         def execute(self, context):
             _reset_session(context.scene.hy3d_local_connector)
             self.report({"INFO"}, "Session reset.")
+            return {"FINISHED"}
+
+
+    class HY3D_LOCAL_CONNECTOR_OT_ClearHY3DObjects(Operator):
+        bl_idname = "hy3d_local_connector.clear_hy3d_objects"
+        bl_label = "Clear HY3D Objects From Scene"
+
+        def execute(self, _context):
+            removed = 0
+            for obj in list(bpy.data.objects):
+                if not _is_hy3d_scene_object(obj):
+                    continue
+                bpy.data.objects.remove(obj, do_unlink=True)
+                removed += 1
+            self.report({"INFO"}, f"Removed {removed} HY3D object(s).")
             return {"FINISHED"}
 
 
@@ -1112,6 +1134,7 @@ if BLENDER_AVAILABLE:  # pragma: no branch
             box.label(text=f"Build ID: {ADDON_BUILD_ID}")
             box.operator("hy3d_local_connector.self_check")
             box.operator("hy3d_local_connector.reset_session")
+            box.operator("hy3d_local_connector.clear_hy3d_objects")
 
             box = layout.box()
             box.label(text="Input")
@@ -1205,6 +1228,7 @@ if BLENDER_AVAILABLE:  # pragma: no branch
         HY3DLocalConnectorProperties,
         HY3D_LOCAL_CONNECTOR_OT_SelfCheck,
         HY3D_LOCAL_CONNECTOR_OT_ResetSession,
+        HY3D_LOCAL_CONNECTOR_OT_ClearHY3DObjects,
         HY3D_LOCAL_CONNECTOR_OT_SelectPrimaryImage,
         HY3D_LOCAL_CONNECTOR_OT_UseSmokeInput,
         HY3D_LOCAL_CONNECTOR_OT_CheckLocalEngine,
@@ -1284,6 +1308,7 @@ __all__ = [
     "_has_valid_repaired_candidate_path",
     "_import_result_package_into_session",
     "_import_result_package_from_path",
+    "_is_hy3d_scene_object",
     "_hy3d_job_dir_path",
     "_local_engine_status",
     "_local_engine_status_file_path",
