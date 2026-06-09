@@ -26,11 +26,11 @@ bl_info = {
 }
 
 ADDON_BUILD_ID = "hy3d_v2_clean_20260521_1535_cloud"
-SOURCE_PROJECT_ROOT = Path(r"E:\3DV4\hy3d_v2")
+SOURCE_PROJECT_ROOT = Path(__file__).resolve().parents[2] / "hy3d_v2"
 SAMPLE_INPUT = SOURCE_PROJECT_ROOT / "test_assets" / "sample_input.png"
 SAMPLE_RESULT_PACKAGE = SOURCE_PROJECT_ROOT / "test_assets" / "result_package_sample.zip"
 VALID_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".avif", ".bmp"}
-CLOUD_ROOT_WINDOWS_DEFAULT = r"G:\Mi unidad\HY3D_V2_CLOUD"
+CLOUD_ROOT_WINDOWS_DEFAULT = ""
 CLOUD_ROOT_COLAB_DEFAULT = "/content/drive/MyDrive/HY3D_V2_CLOUD"
 CLOUD_SUBDIRS = ("incoming", "processing", "completed", "failed", "logs", "notebooks")
 CLOUD_STATUS_NOT_CONFIGURED = "not_configured"

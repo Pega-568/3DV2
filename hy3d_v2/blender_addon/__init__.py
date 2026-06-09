@@ -64,11 +64,11 @@ except Exception:  # pragma: no cover - importable outside Blender for tests
         return None
 
 
-CLOUD_ROOT_WINDOWS_DEFAULT = r"G:\Mi unidad\HY3D_V2_CLOUD"
+CLOUD_ROOT_WINDOWS_DEFAULT = ""
 CLOUD_ROOT_COLAB_DEFAULT = "/content/drive/MyDrive/HY3D_V2_CLOUD"
 CLOUD_SUBDIRS = ("incoming", "processing", "completed", "failed", "logs", "notebooks")
 ADDON_BUILD_ID = "hy3d_v2_20260520_1155_routesafe"
-SOURCE_PROJECT_ROOT_WINDOWS = Path(r"E:\3DV4\hy3d_v2")
+SOURCE_PROJECT_ROOT = PROJECT_ROOT
 
 
 def addon_root() -> Path:
@@ -204,7 +204,7 @@ def _selected_reference_views(props) -> list[ReferenceView]:
 
 
 def _sample_input_path() -> Path:
-    preferred = SOURCE_PROJECT_ROOT_WINDOWS / "test_assets" / "sample_input.png"
+    preferred = SOURCE_PROJECT_ROOT / "test_assets" / "sample_input.png"
     if preferred.exists():
         return preferred
     return PROJECT_ROOT / "test_assets" / "sample_input.png"

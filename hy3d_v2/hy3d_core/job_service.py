@@ -7,9 +7,10 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from .models import JobPaths, ReferenceView, ReviewPayload
+from .repair.service import run_repair_benchmark
 from .stl.service import export_glb_to_stl, validate_stl_file
 from .utils.files import copy_file, ensure_dir, read_json, utc_now_iso, write_json
-from .validation.service import validate_candidate_glb
+from .validation.service import analyze_mesh_quality, validate_candidate_glb
 
 INPUT_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".avif", ".bmp"}
 
@@ -258,18 +259,32 @@ def import_result_package(root: Path, job_id: str, result_package: Path, version
         raise HY3DError("engine_output/model.glb is not a valid file")
 
     report = validate_candidate_glb(candidate_path)
+    mesh_quality_report = analyze_mesh_quality(candidate_path)
+    repair_benchmark = run_repair_benchmark(candidate_path, paths.engine_output_dir, paths.validation_dir)
+    repaired_candidate_paths = repair_benchmark["paths"]
+    repaired_candidate_reports = repair_benchmark["report_paths"]
     candidate_manifest = {
         "job_id": job_id,
         "version_id": version_id,
         "candidate_path": str(candidate_path),
+        "repaired_candidate_path": repaired_candidate_paths.get("light"),
+        "repaired_candidate_light_path": repaired_candidate_paths.get("light"),
+        "repaired_candidate_meshfix_path": repaired_candidate_paths.get("meshfix"),
+        "repaired_candidate_meshlab_path": repaired_candidate_paths.get("meshlab"),
+        "repaired_candidate_paths": repaired_candidate_paths,
         "imported_at": utc_now_iso(),
         "validation_status": report["validation_status"],
+        "mesh_quality_status": "repair_recommended" if mesh_quality_report.get("repair_recommended") else "mesh_ok_or_review",
+        "mesh_quality_report_path": str(paths.validation_dir / "mesh_quality_report.json"),
+        "repair_report_paths": repaired_candidate_reports,
+        "repair_recommended": bool(mesh_quality_report.get("repair_recommended")),
         "result_manifest_path": str(result_manifest_path),
         "result_manifest_version": result_manifest.get("result_package_version"),
         "extracted_files": [str(path) for path in extracted],
     }
     write_json(paths.manifests["candidate_manifest"], candidate_manifest)
     write_json(paths.validation_dir / "candidate_validation_report.json", report)
+    write_json(paths.validation_dir / "mesh_quality_report.json", mesh_quality_report)
 
     job_manifest = read_json(paths.manifests["job"])
     job_manifest["status"] = "candidate_ready_for_review"

@@ -21,6 +21,7 @@ from hy3d_v2.hy3d_core.job_service import (
 )
 from hy3d_v2.hy3d_core.models import ReferenceView, ReviewPayload
 from hy3d_v2.hy3d_core.utils.files import read_json
+from hy3d_v2.hy3d_core.validation.service import analyze_mesh_quality
 
 
 ASSETS_DIR = Path(__file__).resolve().parents[1] / "test_assets"
@@ -104,8 +105,38 @@ def test_import_result_package_creates_candidate_manifest(project_root: Path, sa
     assert candidate_manifest.exists()
     assert (project_root / "jobs" / manifest["job_id"] / "versions" / "v1" / "engine_output" / "model.glb").exists()
     validation_report = read_json(project_root / "jobs" / manifest["job_id"] / "versions" / "v1" / "validation" / "candidate_validation_report.json")
+    mesh_quality_report = read_json(project_root / "jobs" / manifest["job_id"] / "versions" / "v1" / "validation" / "mesh_quality_report.json")
+    validation_dir = project_root / "jobs" / manifest["job_id"] / "versions" / "v1" / "validation"
     assert validation_report["file_size"] > 0
     assert "validation_warnings" in validation_report
+    assert "readable_by_trimesh" in mesh_quality_report
+    assert "readable_by_pyvista" in mesh_quality_report
+    assert "vertex_count" in mesh_quality_report
+    assert "face_count" in mesh_quality_report
+    assert "watertight" in mesh_quality_report
+    assert "winding_consistent" in mesh_quality_report
+    assert "euler_number" in mesh_quality_report
+    assert "non_empty" in mesh_quality_report
+    assert "validation_warnings" in mesh_quality_report
+    assert "repair_recommended" in mesh_quality_report
+    assert "repair_strategy" in mesh_quality_report
+    assert "flatness_score" in mesh_quality_report
+    for report_name in [
+        "repair_report_light.json",
+        "repair_report_meshfix.json",
+        "repair_report_meshlab.json",
+        "repair_comparison_report.json",
+    ]:
+        assert (validation_dir / report_name).exists()
+    meshfix_report = read_json(validation_dir / "repair_report_meshfix.json")
+    meshlab_report = read_json(validation_dir / "repair_report_meshlab.json")
+    if not meshfix_report["available"]:
+        assert "pymeshfix_unavailable" in meshfix_report["warnings"]
+    if not meshlab_report["available"]:
+        assert "pymeshlab_unavailable" in meshlab_report["warnings"]
+    candidate_manifest_payload = read_json(candidate_manifest)
+    assert "repaired_candidate_paths" in candidate_manifest_payload
+    assert "repair_report_paths" in candidate_manifest_payload
 
 
 def test_save_review_and_promote_to_accepted(project_root: Path, sample_input_png: Path, sample_model_glb: Path) -> None:
@@ -151,6 +182,10 @@ def test_export_stl_uses_accepted_model_only(project_root: Path, sample_input_pn
     assert stl_path == accepted_dir / "accepted_model.stl"
     stl_validation = read_json(accepted_dir / "stl_validation_report.json")
     assert (accepted_dir / "printability_report.json").exists()
+    assert stl_validation["exists"] is True
+    assert stl_validation["file_size"] > 0
+    assert "readable" in stl_validation
+    assert "validation_status" in stl_validation
     assert "watertight" in stl_validation
     assert "bbox" in stl_validation
     assert "printability_status" in stl_validation
@@ -199,12 +234,35 @@ def test_no_overwrite_same_version_accepted_glb(project_root: Path, sample_input
 
 def test_model_glb_does_not_create_stl_without_accepted(project_root: Path, sample_input_png: Path, result_package_sample: Path) -> None:
     manifest = create_job(project_root, sample_input_png)
-    import_result_package(project_root, manifest["job_id"], result_package_sample)
+    candidate_manifest = import_result_package(project_root, manifest["job_id"], result_package_sample)
     accepted_dir = project_root / "jobs" / manifest["job_id"] / "versions" / "v1" / "accepted"
 
     assert not (accepted_dir / "accepted_model.stl").exists()
+    for repaired_path in candidate_manifest.get("repaired_candidate_paths", {}).values():
+        if repaired_path:
+            assert Path(repaired_path).suffix == ".glb"
+            assert not Path(repaired_path).with_suffix(".stl").exists()
     with pytest.raises(HY3DError, match="active accepted version"):
         export_active_accepted_stl(project_root, manifest["job_id"])
+
+
+def test_mesh_quality_gate_creates_repaired_candidate_for_broken_mesh(tmp_path: Path) -> None:
+    trimesh = pytest.importorskip("trimesh")
+    import numpy as np
+
+    broken = trimesh.creation.box()
+    broken.update_faces(np.arange(len(broken.faces) - 1))
+    candidate_path = tmp_path / "broken_candidate.glb"
+    repaired_path = tmp_path / "repaired_candidate.glb"
+    broken.export(candidate_path)
+
+    report = analyze_mesh_quality(candidate_path, repaired_candidate_path=repaired_path)
+
+    assert report["readable"] is True
+    assert report["hole_warning"] is True
+    assert report["repair_recommended"] is True
+    assert report["repair_performed"] is True
+    assert repaired_path.exists()
 
 
 def test_save_edited_model_and_promote_from_edited(project_root: Path, sample_input_png: Path, sample_model_glb: Path) -> None:

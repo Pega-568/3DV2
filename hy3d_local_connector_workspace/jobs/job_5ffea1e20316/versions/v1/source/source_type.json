@@ -1,6 +1,0 @@
-{
-  "version_id": "v1",
-  "source_type": "image_to_3d",
-  "input_mode": "single_image",
-  "primary_image": "versions/v1/source/primary_image.png"
-}

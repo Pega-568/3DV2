@@ -1,21 +1,60 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import subprocess
 import sys
+import uuid
 from datetime import datetime
 from pathlib import Path
 
-PROJECT_ROOT = Path(r"E:\3DV4\hy3d_v2")
+MODULE_ROOT = Path(__file__).resolve().parent
+ADDON_ROOT = MODULE_ROOT.parent
+REPO_ROOT = ADDON_ROOT.parent
+LOCAL_CONFIG_PATH = REPO_ROOT / "hy3d_local_config.json"
+
+
+def _load_local_config() -> dict[str, str]:
+    if not LOCAL_CONFIG_PATH.exists():
+        return {}
+    try:
+        payload = json.loads(LOCAL_CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {str(key): str(value) for key, value in payload.items() if value}
+
+
+_LOCAL_CONFIG = _load_local_config()
+
+
+def _configured_path(env_name: str, config_key: str, fallback: Path) -> Path:
+    value = os.environ.get(env_name) or _LOCAL_CONFIG.get(config_key) or _LOCAL_CONFIG.get(env_name)
+    if value:
+        return Path(value).expanduser()
+    return fallback
+
+
+PROJECT_ROOT = _configured_path("HY3D_PROJECT_ROOT", "project_root", REPO_ROOT / "hy3d_v2")
 CORE_ROOT = PROJECT_ROOT / "hy3d_core"
-LOCAL_CONNECTOR_ROOT = Path(r"E:\3DV4\hy3d_local_connector_addon\hy3d_local_connector")
-WRAPPER_RUN = Path(r"E:\3D_ENGINES\wrappers\run_triposr_local.ps1")
-ENGINE_ROOT = Path(r"E:\3D_ENGINES\triposr-local")
+LOCAL_CONNECTOR_ROOT = MODULE_ROOT
+ENGINE_ROOT = _configured_path("HY3D_ENGINE_ROOT", "engine_root", REPO_ROOT.parent / "3D_ENGINES" / "triposr-local")
+WRAPPER_RUN = _configured_path("HY3D_WRAPPER_RUN", "wrapper_run", ENGINE_ROOT.parent / "wrappers" / "run_triposr_local.ps1")
 ENGINE_VENV = ENGINE_ROOT / ".venv"
 ENGINE_REPO = ENGINE_ROOT / "TripoSR"
+EXPORTS_ROOT = _configured_path("HY3D_EXPORTS_ROOT", "exports_root", REPO_ROOT / "HY3D_EXPORTS")
 SAMPLE_INPUT = PROJECT_ROOT / "test_assets" / "real_smoke_input.png"
 VALID_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".avif"}
 ADDON_BUILD_ID = f"hy3d_local_connector_{datetime.now().strftime('%Y%m%d_%H%M')}"
+STATUS_NO_JOB = "no_job"
+STATUS_ENGINE_GENERATED = "engine_generated"
+STATUS_IMPORTED_TO_HY3D = "imported_to_hy3d"
+STATUS_CANDIDATE_IMPORTED = "candidate_imported"
+STATUS_ACCEPTED = "accepted"
+STATUS_STL_EXPORTED = "stl_exported"
+STATUS_STL_VALIDATED = "stl_validated"
 
 PROJECT_PARENT = PROJECT_ROOT.parent
 if str(PROJECT_PARENT) not in sys.path:
@@ -23,6 +62,7 @@ if str(PROJECT_PARENT) not in sys.path:
 
 from hy3d_v2.hy3d_core.job_service import (  # noqa: E402
     HY3DError,
+    build_job_paths,
     create_job,
     export_stl_from_accepted,
     import_result_package,
@@ -30,7 +70,8 @@ from hy3d_v2.hy3d_core.job_service import (  # noqa: E402
     save_manual_review,
 )
 from hy3d_v2.hy3d_core.models import ReviewPayload  # noqa: E402
-from hy3d_v2.hy3d_core.utils.files import read_json, utc_now_iso  # noqa: E402
+from hy3d_v2.hy3d_core.stl.service import validate_stl_file  # noqa: E402
+from hy3d_v2.hy3d_core.utils.files import read_json, utc_now_iso, write_json  # noqa: E402
 
 bl_info = {
     "name": "HY3D Local Connector",
@@ -44,7 +85,7 @@ bl_info = {
 
 try:  # pragma: no cover - Blender-only import
     import bpy
-    from bpy.props import IntProperty, PointerProperty, StringProperty
+    from bpy.props import BoolProperty, IntProperty, PointerProperty, StringProperty
     from bpy.types import Operator, Panel, PropertyGroup
     from bpy_extras.io_utils import ImportHelper
 
@@ -71,6 +112,9 @@ except Exception:  # pragma: no cover - importable outside Blender for tests
     def IntProperty(**_kwargs):  # type: ignore[misc]
         return None
 
+    def BoolProperty(**_kwargs):  # type: ignore[misc]
+        return None
+
     def PointerProperty(**_kwargs):  # type: ignore[misc]
         return None
 
@@ -83,6 +127,10 @@ def workspace_root() -> Path:
     fallback = PROJECT_ROOT.parent / "hy3d_local_connector_workspace"
     fallback.mkdir(parents=True, exist_ok=True)
     return fallback
+
+
+def _new_engine_job_id() -> str:
+    return f"job_{uuid.uuid4().hex[:12]}"
 
 
 def _normalize_path_string(raw_value) -> str:
@@ -147,8 +195,58 @@ def _validate_result_package_path(value) -> tuple[Path | None, str | None]:
     return path, None
 
 
+def _engine_output_dir_path(props) -> Path | None:
+    return _resolve_existing_dir(getattr(props, "engine_output_dir", ""))
+
+
+def _hy3d_job_dir_path(props) -> Path | None:
+    job_id = getattr(props, "job_id", "").strip()
+    if not job_id:
+        return None
+    return _resolve_existing_dir(workspace_root() / "jobs" / job_id)
+
+
+def _accepted_dir_path(props) -> Path | None:
+    accepted_model = _resolve_existing_file(getattr(props, "accepted_model_path", ""), suffix=".glb")
+    if accepted_model is not None:
+        return _resolve_existing_dir(accepted_model.parent)
+    job_dir = _hy3d_job_dir_path(props)
+    if job_dir is None:
+        return None
+    version_id = getattr(props, "version_id", "v1") or "v1"
+    return _resolve_existing_dir(job_dir / "versions" / version_id / "accepted")
+
+
+def _validation_dir_path(props) -> Path | None:
+    job_dir = _hy3d_job_dir_path(props)
+    if job_dir is None:
+        return None
+    version_id = getattr(props, "version_id", "v1") or "v1"
+    return _resolve_existing_dir(job_dir / "versions" / version_id / "validation")
+
+
+def _exports_dir_path(props) -> Path | None:
+    return _resolve_existing_dir(getattr(props, "exports_dir", ""))
+
+
 def _has_valid_candidate_model_path(props) -> bool:
     return _resolve_existing_file(getattr(props, "candidate_model_path", ""), suffix=".glb") is not None
+
+
+def _has_valid_repaired_candidate_path(props) -> bool:
+    return _resolve_existing_file(getattr(props, "repaired_candidate_path", ""), suffix=".glb") is not None
+
+
+def _has_valid_light_candidate_path(props) -> bool:
+    return _resolve_existing_file(getattr(props, "repaired_candidate_light_path", ""), suffix=".glb") is not None
+
+
+def _has_valid_meshfix_candidate_path(props) -> bool:
+    return _resolve_existing_file(getattr(props, "repaired_candidate_meshfix_path", ""), suffix=".glb") is not None
+
+
+def _has_valid_meshlab_candidate_path(props) -> bool:
+    return _resolve_existing_file(getattr(props, "repaired_candidate_meshlab_path", ""), suffix=".glb") is not None
 
 
 def _has_valid_accepted_model_path(props) -> bool:
@@ -156,7 +254,19 @@ def _has_valid_accepted_model_path(props) -> bool:
 
 
 def _stl_export_ready(props) -> bool:
-    return bool(getattr(props, "job_id", "").strip()) and _has_valid_accepted_model_path(props)
+    return getattr(props, "current_status", STATUS_NO_JOB) == STATUS_ACCEPTED and _has_valid_accepted_model_path(props)
+
+
+def _validate_stl_ready(props) -> bool:
+    if getattr(props, "current_status", STATUS_NO_JOB) not in {STATUS_STL_EXPORTED, STATUS_STL_VALIDATED}:
+        return False
+    if not bool(getattr(props, "job_id", "").strip()):
+        return False
+    accepted_model = _resolve_existing_file(getattr(props, "accepted_model_path", ""), suffix=".glb")
+    if accepted_model is None:
+        return False
+    stl_path = build_job_paths(workspace_root(), props.job_id, getattr(props, "version_id", "v1") or "v1").accepted_dir / "accepted_model.stl"
+    return stl_path.exists() and stl_path.is_file()
 
 
 def _local_engine_status() -> dict[str, object]:
@@ -165,7 +275,13 @@ def _local_engine_status() -> dict[str, object]:
     return {
         "build_id": ADDON_BUILD_ID,
         "addon_path": str(LOCAL_CONNECTOR_ROOT),
+        "config_path": str(LOCAL_CONFIG_PATH),
+        "config_exists": LOCAL_CONFIG_PATH.exists(),
+        "project_root": str(PROJECT_ROOT),
         "workspace": str(workspace_root()),
+        "engine_root": str(ENGINE_ROOT),
+        "wrapper_run": str(WRAPPER_RUN),
+        "exports_root": str(EXPORTS_ROOT),
         "wrapper_exists": WRAPPER_RUN.exists(),
         "venv_exists": ENGINE_VENV.exists(),
         "python_exists": python_exe.exists(),
@@ -175,16 +291,168 @@ def _local_engine_status() -> dict[str, object]:
     }
 
 
+def _status_payload(props) -> dict[str, object]:
+    return {
+        "allowed_statuses": [
+            STATUS_NO_JOB,
+            STATUS_ENGINE_GENERATED,
+            STATUS_IMPORTED_TO_HY3D,
+            STATUS_CANDIDATE_IMPORTED,
+            STATUS_ACCEPTED,
+            STATUS_STL_EXPORTED,
+            STATUS_STL_VALIDATED,
+        ],
+        "engine_job_id": getattr(props, "engine_job_id", "").strip() or None,
+        "engine_output_dir": _normalize_path_string(getattr(props, "engine_output_dir", "")) or None,
+        "result_package_path": _normalize_path_string(getattr(props, "result_package_path", "")) or None,
+        "hy3d_imported": bool(getattr(props, "hy3d_imported", False)),
+        "hy3d_job_id": getattr(props, "job_id", "").strip() or None,
+        "hy3d_job_folder": str(_hy3d_job_dir_path(props)) if _hy3d_job_dir_path(props) else None,
+        "accepted_model_path": _normalize_path_string(getattr(props, "accepted_model_path", "")) or None,
+        "repaired_candidate_light_path": _normalize_path_string(getattr(props, "repaired_candidate_light_path", "")) or None,
+        "repaired_candidate_meshfix_path": _normalize_path_string(getattr(props, "repaired_candidate_meshfix_path", "")) or None,
+        "repaired_candidate_meshlab_path": _normalize_path_string(getattr(props, "repaired_candidate_meshlab_path", "")) or None,
+        "stl_path": _normalize_path_string(getattr(props, "accepted_stl_path", "")) or None,
+        "stl_validation_report_path": _normalize_path_string(getattr(props, "stl_validation_report_path", "")) or None,
+        "printability_report_path": _normalize_path_string(getattr(props, "printability_report_path", "")) or None,
+        "exports_folder": _normalize_path_string(getattr(props, "exports_dir", "")) or None,
+        "status": getattr(props, "current_status", STATUS_NO_JOB),
+    }
+
+
+def _local_engine_status_file_path(props) -> Path | None:
+    engine_output_dir = _engine_output_dir_path(props)
+    if engine_output_dir is None:
+        return None
+    return engine_output_dir / "local_engine_status.json"
+
+
+def _write_local_engine_status(props) -> Path | None:
+    status_path = _local_engine_status_file_path(props)
+    if status_path is None:
+        return None
+    write_json(status_path, _status_payload(props))
+    props.local_engine_status_path = str(status_path)
+    return status_path
+
+
+def _set_status(props, status: str) -> None:
+    props.current_status = status
+    _write_local_engine_status(props)
+
+
+def _set_engine_generated_state(props, engine_job_id: str, engine_output_dir: Path, result_package_path: Path) -> None:
+    props.engine_job_id = engine_job_id
+    props.engine_output_dir = str(engine_output_dir)
+    props.result_package_path = str(result_package_path)
+    props.hy3d_imported = False
+    props.job_id = ""
+    props.candidate_model_path = ""
+    props.repaired_candidate_path = ""
+    props.repaired_candidate_light_path = ""
+    props.repaired_candidate_meshfix_path = ""
+    props.repaired_candidate_meshlab_path = ""
+    props.accepted_model_path = ""
+    props.accepted_stl_path = ""
+    props.stl_validation_report_path = ""
+    props.printability_report_path = ""
+    props.exports_dir = ""
+    props.last_status = STATUS_ENGINE_GENERATED
+    props.last_error = ""
+    _set_status(props, STATUS_ENGINE_GENERATED)
+
+
+def _set_imported_to_hy3d_state(props, hy3d_job_id: str) -> None:
+    props.job_id = hy3d_job_id
+    props.hy3d_imported = True
+    props.last_status = STATUS_IMPORTED_TO_HY3D
+    props.last_error = ""
+    _set_status(props, STATUS_IMPORTED_TO_HY3D)
+
+
+def _exports_job_dir(engine_job_id: str) -> Path:
+    target_name = engine_job_id if engine_job_id.startswith("job_") else f"job_{engine_job_id}"
+    target = EXPORTS_ROOT / target_name
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def _sync_exports_from_accepted(props) -> Path:
+    accepted_model = _resolve_existing_file(getattr(props, "accepted_model_path", ""), suffix=".glb")
+    accepted_stl = _resolve_existing_file(getattr(props, "accepted_stl_path", ""), suffix=".stl")
+    if accepted_model is None or accepted_stl is None:
+        raise HY3DError("Accepted GLB and STL are required before exporting to HY3D_EXPORTS.")
+    accepted_dir = _accepted_dir_path(props)
+    if accepted_dir is None:
+        raise HY3DError("Accepted folder is not available.")
+    engine_job_id = getattr(props, "engine_job_id", "").strip()
+    if not engine_job_id:
+        engine_job_id = getattr(props, "job_id", "").strip()
+    if not engine_job_id:
+        raise HY3DError("Job id is not available.")
+    export_dir = _exports_job_dir(engine_job_id)
+    for name in [
+        "accepted_model.stl",
+        "accepted_model.glb",
+        "stl_validation_report.json",
+        "printability_report.json",
+    ]:
+        source = accepted_dir / name
+        if source.exists() and source.is_file():
+            shutil.copy2(source, export_dir / name)
+    props.exports_dir = str(export_dir)
+    return export_dir
+
+
+def _resolve_import_primary_image(props, package_path: Path) -> tuple[Path | None, str | None]:
+    primary_image, _ = _validate_primary_image(getattr(props, "primary_image_path", ""))
+    if primary_image is not None:
+        return primary_image, None
+    engine_output_dir = package_path.parent
+    fallback = engine_output_dir / "engine_raw" / "0" / "input.png"
+    if fallback.exists() and fallback.is_file():
+        props.primary_image_path = str(fallback)
+        return fallback, None
+    return None, "Primary image is required to create the HY3D workspace job."
+
+
+def _import_result_package_from_path(props, package_path: Path) -> dict:
+    primary_image, error = _resolve_import_primary_image(props, package_path)
+    if primary_image is None:
+        raise HY3DError(error or "Primary image is not available.")
+    if _engine_output_dir_path(props) is None:
+        props.engine_output_dir = str(package_path.parent)
+    if not getattr(props, "engine_job_id", "").strip():
+        props.engine_job_id = package_path.parent.name
+    manifest = create_job(workspace_root(), primary_image)
+    props.version_id = "v1"
+    _set_imported_to_hy3d_state(props, manifest["job_id"])
+    imported_manifest = _import_result_package_into_session(props, package_path)
+    return imported_manifest
+
+
 def _reset_session(props) -> None:
     props.primary_image_path = ""
+    props.engine_job_id = ""
     props.job_id = ""
     props.version_id = "v1"
     props.engine_output_dir = ""
+    props.local_engine_status_path = ""
     props.result_package_path = ""
     props.candidate_model_path = ""
+    props.repaired_candidate_path = ""
+    props.repaired_candidate_light_path = ""
+    props.repaired_candidate_meshfix_path = ""
+    props.repaired_candidate_meshlab_path = ""
     props.accepted_model_path = ""
+    props.accepted_stl_path = ""
+    props.stl_validation_report_path = ""
+    props.printability_report_path = ""
+    props.exports_dir = ""
+    props.hy3d_imported = False
+    props.current_status = STATUS_NO_JOB
     props.self_check_status = ""
-    props.last_status = ""
+    props.last_status = STATUS_NO_JOB
     props.last_error = ""
 
 
@@ -201,8 +469,28 @@ def _import_result_package_into_session(props, package_path: Path) -> dict:
     manifest = import_result_package(workspace_root(), props.job_id, package_path, version_id=props.version_id or "v1")
     props.result_package_path = str(package_path)
     props.candidate_model_path = manifest["candidate_path"]
+    props.repaired_candidate_path = str(manifest.get("repaired_candidate_path") or "")
+    props.repaired_candidate_light_path = str(manifest.get("repaired_candidate_light_path") or "")
+    props.repaired_candidate_meshfix_path = str(manifest.get("repaired_candidate_meshfix_path") or "")
+    props.repaired_candidate_meshlab_path = str(manifest.get("repaired_candidate_meshlab_path") or "")
     props.accepted_model_path = ""
+    props.accepted_stl_path = ""
+    props.stl_validation_report_path = ""
+    props.printability_report_path = ""
+    _write_local_engine_status(props)
     return manifest
+
+
+def _import_candidate_glb_for_review(context, props, candidate_path: Path, candidate_type: str, label: str) -> None:
+    existing_names = {obj.name for obj in bpy.data.objects}
+    bpy.ops.import_scene.gltf(filepath=str(candidate_path))
+    imported = [obj for obj in context.selected_objects if obj.name not in existing_names] or list(context.selected_objects)
+    for obj in imported:
+        obj["hy3d_role"] = "candidate"
+        obj["hy3d_candidate_type"] = candidate_type
+        obj["hy3d_source_path"] = str(candidate_path)
+        obj["hy3d_job_id"] = props.job_id
+    _set_status(props, STATUS_CANDIDATE_IMPORTED)
 
 
 def _export_selected_object_to_stl(stl_path: Path, accepted_object) -> None:
@@ -228,15 +516,47 @@ def _export_selected_object_to_stl(stl_path: Path, accepted_object) -> None:
     raise HY3DError("No STL export operator is available in this Blender build.")
 
 
+def _validate_existing_stl(props) -> dict:
+    if not getattr(props, "job_id", "").strip():
+        raise HY3DError("Run Local TripoSR before validating STL.")
+    accepted_model = _resolve_existing_file(getattr(props, "accepted_model_path", ""), suffix=".glb")
+    if accepted_model is None:
+        raise HY3DError("Accepted model path is not available.")
+    accepted_dir = build_job_paths(workspace_root(), props.job_id, getattr(props, "version_id", "v1") or "v1").accepted_dir
+    stl_path = accepted_dir / "accepted_model.stl"
+    if not stl_path.exists() or not stl_path.is_file():
+        raise HY3DError("accepted_model.stl is not available.")
+    report = validate_stl_file(stl_path)
+    write_json(accepted_dir / "stl_validation_report.json", report)
+    write_json(accepted_dir / "printability_report.json", report.get("printability_report", {}))
+    return report
+
+
+def _path_openable(path: Path | None) -> bool:
+    return path is not None and path.exists()
+
+
 if BLENDER_AVAILABLE:  # pragma: no branch
     class HY3DLocalConnectorProperties(PropertyGroup):
         primary_image_path: StringProperty(name="Primary Image Path", default="")
+        engine_job_id: StringProperty(name="Engine Job ID", default="")
         job_id: StringProperty(name="Job ID", default="")
         version_id: StringProperty(name="Version ID", default="v1")
         engine_output_dir: StringProperty(name="Engine Output Dir", default="")
+        local_engine_status_path: StringProperty(name="Local Engine Status Path", default="")
         result_package_path: StringProperty(name="Result Package Path", default="")
         candidate_model_path: StringProperty(name="Candidate Model Path", default="")
+        repaired_candidate_path: StringProperty(name="Repaired Candidate Path", default="")
+        repaired_candidate_light_path: StringProperty(name="Light Repaired Candidate Path", default="")
+        repaired_candidate_meshfix_path: StringProperty(name="MeshFix Candidate Path", default="")
+        repaired_candidate_meshlab_path: StringProperty(name="MeshLab Candidate Path", default="")
         accepted_model_path: StringProperty(name="Accepted Model Path", default="")
+        accepted_stl_path: StringProperty(name="Accepted STL Path", default="")
+        stl_validation_report_path: StringProperty(name="STL Validation Report Path", default="")
+        printability_report_path: StringProperty(name="Printability Report Path", default="")
+        exports_dir: StringProperty(name="Exports Dir", default="")
+        current_status: StringProperty(name="Current Status", default=STATUS_NO_JOB)
+        hy3d_imported: BoolProperty(name="HY3D Imported", default=False)
         self_check_status: StringProperty(name="Self Check Status", default="")
         last_status: StringProperty(name="Last Status", default="")
         last_error: StringProperty(name="Last Error", default="")
@@ -344,21 +664,10 @@ if BLENDER_AVAILABLE:  # pragma: no branch
                 self.report({"ERROR"}, error or "Primary image is invalid.")
                 return {"CANCELLED"}
 
-            try:
-                manifest = create_job(workspace_root(), primary_image)
-            except Exception as exc:
-                self.report({"ERROR"}, str(exc))
-                return {"CANCELLED"}
-
-            props.job_id = manifest["job_id"]
+            engine_job_id = _new_engine_job_id()
             props.version_id = "v1"
-            props.candidate_model_path = ""
-            props.accepted_model_path = ""
-            props.result_package_path = ""
-            props.last_error = ""
-            output_dir = ENGINE_ROOT / "outputs" / props.job_id
+            output_dir = ENGINE_ROOT / "outputs" / engine_job_id
             output_dir.mkdir(parents=True, exist_ok=True)
-            props.engine_output_dir = str(output_dir)
 
             command = [
                 "powershell",
@@ -371,7 +680,7 @@ if BLENDER_AVAILABLE:  # pragma: no branch
                 "-output_dir",
                 str(output_dir),
                 "-job_id",
-                props.job_id,
+                engine_job_id,
                 "-version_id",
                 props.version_id or "v1",
             ]
@@ -416,8 +725,8 @@ if BLENDER_AVAILABLE:  # pragma: no branch
                     props.last_error = "run_report.json did not provide a valid result_package.zip."
                     self.report({"ERROR"}, props.last_error)
                     return {"CANCELLED"}
-                props.result_package_path = str(result_package)
-                self.report({"INFO"}, "Local TripoSR run completed.")
+                _set_engine_generated_state(props, engine_job_id, output_dir, result_package)
+                self.report({"INFO"}, "Result package generated. Next step: Import Local Result.")
                 return {"FINISHED"}
 
             error_message = run_report.get("error") or completed.stderr or completed.stdout or "Local TripoSR failed."
@@ -432,25 +741,47 @@ if BLENDER_AVAILABLE:  # pragma: no branch
 
         def execute(self, context):
             props = context.scene.hy3d_local_connector
-            if not props.job_id.strip():
-                self.report({"ERROR"}, "Run Local TripoSR before importing a result.")
-                return {"CANCELLED"}
             package_path, error = _validate_result_package_path(props.result_package_path)
             if package_path is None:
                 self.report({"ERROR"}, error or "Result package is invalid.")
                 return {"CANCELLED"}
             try:
-                _import_result_package_into_session(props, package_path)
+                _import_result_package_from_path(props, package_path)
             except Exception as exc:
                 self.report({"ERROR"}, str(exc))
                 return {"CANCELLED"}
-            self.report({"INFO"}, "Local result imported into workspace.")
+            props.last_error = ""
+            self.report({"INFO"}, f"Local result imported into HY3D: {_hy3d_job_dir_path(props)}")
+            return {"FINISHED"}
+
+
+    class HY3D_LOCAL_CONNECTOR_OT_ImportExistingResultPackage(Operator, ImportHelper):
+        bl_idname = "hy3d_local_connector.import_existing_result_package"
+        bl_label = "Import Existing Result Package"
+        filename_ext = ".zip"
+        filter_glob: StringProperty(default="*.zip", options={"HIDDEN"})
+
+        def execute(self, context):
+            props = context.scene.hy3d_local_connector
+            package_path, error = _validate_result_package_path(self.filepath)
+            if package_path is None:
+                self.report({"ERROR"}, error or "Result package is invalid.")
+                return {"CANCELLED"}
+            props.result_package_path = str(package_path)
+            props.engine_output_dir = str(package_path.parent)
+            props.engine_job_id = package_path.parent.name
+            try:
+                _import_result_package_from_path(props, package_path)
+            except Exception as exc:
+                self.report({"ERROR"}, str(exc))
+                return {"CANCELLED"}
+            self.report({"INFO"}, f"Existing result package imported into HY3D: {_hy3d_job_dir_path(props)}")
             return {"FINISHED"}
 
 
     class HY3D_LOCAL_CONNECTOR_OT_ImportCandidateGLB(Operator):
         bl_idname = "hy3d_local_connector.import_candidate_glb"
-        bl_label = "Import Candidate GLB"
+        bl_label = "Import Original Candidate GLB"
 
         def execute(self, context):
             props = context.scene.hy3d_local_connector
@@ -458,18 +789,69 @@ if BLENDER_AVAILABLE:  # pragma: no branch
             if candidate is None:
                 self.report({"ERROR"}, "Candidate GLB path is not available.")
                 return {"CANCELLED"}
-            existing_names = {obj.name for obj in bpy.data.objects}
             try:
-                bpy.ops.import_scene.gltf(filepath=str(candidate))
+                _import_candidate_glb_for_review(context, props, candidate, "original", "Candidate")
             except Exception as exc:
                 self.report({"ERROR"}, f"Failed to import candidate GLB: {exc}")
                 return {"CANCELLED"}
-            imported = [obj for obj in context.selected_objects if obj.name not in existing_names] or list(context.selected_objects)
-            for obj in imported:
-                obj["hy3d_role"] = "candidate"
-                obj["hy3d_source_path"] = str(candidate)
-                obj["hy3d_job_id"] = props.job_id
             self.report({"INFO"}, "Candidate GLB imported.")
+            return {"FINISHED"}
+
+
+    class HY3D_LOCAL_CONNECTOR_OT_ImportRepairedCandidateGLB(Operator):
+        bl_idname = "hy3d_local_connector.import_repaired_candidate_glb"
+        bl_label = "Import Light Repaired Candidate"
+
+        def execute(self, context):
+            props = context.scene.hy3d_local_connector
+            repaired_candidate = _resolve_existing_file(props.repaired_candidate_light_path or props.repaired_candidate_path, suffix=".glb")
+            if repaired_candidate is None:
+                self.report({"ERROR"}, "Light repaired candidate GLB path is not available.")
+                return {"CANCELLED"}
+            try:
+                _import_candidate_glb_for_review(context, props, repaired_candidate, "light", "Light repaired candidate")
+            except Exception as exc:
+                self.report({"ERROR"}, f"Failed to import light repaired candidate GLB: {exc}")
+                return {"CANCELLED"}
+            self.report({"INFO"}, "Light repaired candidate GLB imported.")
+            return {"FINISHED"}
+
+
+    class HY3D_LOCAL_CONNECTOR_OT_ImportMeshFixCandidateGLB(Operator):
+        bl_idname = "hy3d_local_connector.import_meshfix_candidate_glb"
+        bl_label = "Import MeshFix Candidate"
+
+        def execute(self, context):
+            props = context.scene.hy3d_local_connector
+            repaired_candidate = _resolve_existing_file(props.repaired_candidate_meshfix_path, suffix=".glb")
+            if repaired_candidate is None:
+                self.report({"ERROR"}, "MeshFix candidate GLB path is not available.")
+                return {"CANCELLED"}
+            try:
+                _import_candidate_glb_for_review(context, props, repaired_candidate, "meshfix", "MeshFix candidate")
+            except Exception as exc:
+                self.report({"ERROR"}, f"Failed to import MeshFix candidate GLB: {exc}")
+                return {"CANCELLED"}
+            self.report({"INFO"}, "MeshFix candidate GLB imported.")
+            return {"FINISHED"}
+
+
+    class HY3D_LOCAL_CONNECTOR_OT_ImportMeshLabCandidateGLB(Operator):
+        bl_idname = "hy3d_local_connector.import_meshlab_candidate_glb"
+        bl_label = "Import MeshLab Candidate"
+
+        def execute(self, context):
+            props = context.scene.hy3d_local_connector
+            repaired_candidate = _resolve_existing_file(props.repaired_candidate_meshlab_path, suffix=".glb")
+            if repaired_candidate is None:
+                self.report({"ERROR"}, "MeshLab candidate GLB path is not available.")
+                return {"CANCELLED"}
+            try:
+                _import_candidate_glb_for_review(context, props, repaired_candidate, "meshlab", "MeshLab candidate")
+            except Exception as exc:
+                self.report({"ERROR"}, f"Failed to import MeshLab candidate GLB: {exc}")
+                return {"CANCELLED"}
+            self.report({"INFO"}, "MeshLab candidate GLB imported.")
             return {"FINISHED"}
 
 
@@ -548,6 +930,11 @@ if BLENDER_AVAILABLE:  # pragma: no branch
             obj["hy3d_role"] = "accepted"
             obj["hy3d_source_path"] = str(accepted_path)
             props.accepted_model_path = str(accepted_path)
+            props.accepted_stl_path = ""
+            props.stl_validation_report_path = ""
+            props.printability_report_path = ""
+            props.exports_dir = ""
+            _set_status(props, STATUS_ACCEPTED)
             self.report({"INFO"}, "Accepted GLB exported.")
             return {"FINISHED"}
 
@@ -599,7 +986,100 @@ if BLENDER_AVAILABLE:  # pragma: no branch
             except Exception as exc:
                 self.report({"ERROR"}, str(exc))
                 return {"CANCELLED"}
-            self.report({"INFO"}, f"Exported {stl_path.name}")
+            props.accepted_stl_path = str(stl_path)
+            export_dir = _sync_exports_from_accepted(props)
+            _set_status(props, STATUS_STL_EXPORTED)
+            props.last_status = STATUS_STL_EXPORTED
+            props.last_error = ""
+            self.report({"INFO"}, f"Exported {stl_path.name} to {export_dir}")
+            return {"FINISHED"}
+
+
+    class HY3D_LOCAL_CONNECTOR_OT_ValidateSTL(Operator):
+        bl_idname = "hy3d_local_connector.validate_stl"
+        bl_label = "Validate STL"
+
+        def execute(self, context):
+            props = context.scene.hy3d_local_connector
+            try:
+                report = _validate_existing_stl(props)
+            except Exception as exc:
+                self.report({"ERROR"}, str(exc))
+                return {"CANCELLED"}
+            accepted_dir = _accepted_dir_path(props)
+            if accepted_dir is not None:
+                props.stl_validation_report_path = str(accepted_dir / "stl_validation_report.json")
+                props.printability_report_path = str(accepted_dir / "printability_report.json")
+            _sync_exports_from_accepted(props)
+            props.last_status = STATUS_STL_VALIDATED
+            props.last_error = ""
+            _set_status(props, STATUS_STL_VALIDATED)
+            self.report({"INFO"}, f"STL validation: {report.get('printability_status', 'unknown')}")
+            return {"FINISHED"}
+
+
+    class HY3D_LOCAL_CONNECTOR_OT_OpenEngineOutputFolder(Operator):
+        bl_idname = "hy3d_local_connector.open_engine_output_folder"
+        bl_label = "Open Engine Output Folder"
+
+        def execute(self, _context):
+            target = _engine_output_dir_path(_context.scene.hy3d_local_connector)
+            if not _path_openable(target):
+                self.report({"ERROR"}, "Engine output folder is not available.")
+                return {"CANCELLED"}
+            bpy.ops.wm.path_open(filepath=str(target))
+            return {"FINISHED"}
+
+
+    class HY3D_LOCAL_CONNECTOR_OT_OpenHY3DJobFolder(Operator):
+        bl_idname = "hy3d_local_connector.open_hy3d_job_folder"
+        bl_label = "Open HY3D Job Folder"
+
+        def execute(self, context):
+            target = _hy3d_job_dir_path(context.scene.hy3d_local_connector)
+            if not _path_openable(target):
+                self.report({"ERROR"}, "HY3D job folder is not available.")
+                return {"CANCELLED"}
+            bpy.ops.wm.path_open(filepath=str(target))
+            return {"FINISHED"}
+
+
+    class HY3D_LOCAL_CONNECTOR_OT_OpenAcceptedFolder(Operator):
+        bl_idname = "hy3d_local_connector.open_accepted_folder"
+        bl_label = "Open Accepted Folder"
+
+        def execute(self, context):
+            target = _accepted_dir_path(context.scene.hy3d_local_connector)
+            if not _path_openable(target):
+                self.report({"ERROR"}, "Accepted folder is not available.")
+                return {"CANCELLED"}
+            bpy.ops.wm.path_open(filepath=str(target))
+            return {"FINISHED"}
+
+
+    class HY3D_LOCAL_CONNECTOR_OT_OpenValidationFolder(Operator):
+        bl_idname = "hy3d_local_connector.open_validation_folder"
+        bl_label = "Open Validation Folder"
+
+        def execute(self, context):
+            target = _validation_dir_path(context.scene.hy3d_local_connector)
+            if not _path_openable(target):
+                self.report({"ERROR"}, "Validation folder is not available.")
+                return {"CANCELLED"}
+            bpy.ops.wm.path_open(filepath=str(target))
+            return {"FINISHED"}
+
+
+    class HY3D_LOCAL_CONNECTOR_OT_OpenExportsFolder(Operator):
+        bl_idname = "hy3d_local_connector.open_exports_folder"
+        bl_label = "Open Exports Folder"
+
+        def execute(self, context):
+            target = _exports_dir_path(context.scene.hy3d_local_connector)
+            if not _path_openable(target):
+                self.report({"ERROR"}, "Exports folder is not available.")
+                return {"CANCELLED"}
+            bpy.ops.wm.path_open(filepath=str(target))
             return {"FINISHED"}
 
 
@@ -648,12 +1128,22 @@ if BLENDER_AVAILABLE:  # pragma: no branch
             row = box.row()
             row.enabled = _validate_result_package_path(props.result_package_path)[0] is not None
             row.operator("hy3d_local_connector.import_local_result")
+            box.operator("hy3d_local_connector.import_existing_result_package")
 
             box = layout.box()
             box.label(text="Candidate")
             row = box.row()
             row.enabled = _has_valid_candidate_model_path(props)
             row.operator("hy3d_local_connector.import_candidate_glb")
+            row = box.row()
+            row.enabled = _has_valid_light_candidate_path(props) or _has_valid_repaired_candidate_path(props)
+            row.operator("hy3d_local_connector.import_repaired_candidate_glb")
+            row = box.row()
+            row.enabled = _has_valid_meshfix_candidate_path(props)
+            row.operator("hy3d_local_connector.import_meshfix_candidate_glb")
+            row = box.row()
+            row.enabled = _has_valid_meshlab_candidate_path(props)
+            row.operator("hy3d_local_connector.import_meshlab_candidate_glb")
 
             box = layout.box()
             box.label(text="Review")
@@ -669,15 +1159,42 @@ if BLENDER_AVAILABLE:  # pragma: no branch
             row = box.row()
             row.enabled = _stl_export_ready(props)
             row.operator("hy3d_local_connector.export_stl_from_accepted")
+            row = box.row()
+            row.enabled = _validate_stl_ready(props)
+            row.operator("hy3d_local_connector.validate_stl")
 
             box = layout.box()
             box.label(text="Workspace")
-            box.operator("hy3d_local_connector.open_workspace_folder")
-            box.label(text=f"Job: {props.job_id or '(none)'}")
+            box.label(text=f"Current Status: {props.current_status or STATUS_NO_JOB}")
+            box.label(text=f"Engine Job: {props.engine_job_id or '(none)'}")
+            box.label(text=f"HY3D Job: {props.job_id or '(none)'}")
             box.label(text=f"Version: {props.version_id or 'v1'}")
+            box.label(text=f"Engine Output Folder: {props.engine_output_dir or '(none)'}")
             box.label(text=f"Result ZIP: {props.result_package_path or '(none)'}")
+            box.label(text=f"HY3D Job Folder: {str(_hy3d_job_dir_path(props)) if _hy3d_job_dir_path(props) else '(none)'}")
             box.label(text=f"Candidate: {props.candidate_model_path or '(none)'}")
+            box.label(text=f"Light Candidate: {props.repaired_candidate_light_path or props.repaired_candidate_path or '(none)'}")
+            box.label(text=f"MeshFix Candidate: {props.repaired_candidate_meshfix_path or '(none)'}")
+            box.label(text=f"MeshLab Candidate: {props.repaired_candidate_meshlab_path or '(none)'}")
             box.label(text=f"Accepted: {props.accepted_model_path or '(none)'}")
+            box.label(text=f"STL Path: {props.accepted_stl_path or '(none)'}")
+            box.label(text=f"Exports Folder: {props.exports_dir or '(none)'}")
+            box.operator("hy3d_local_connector.open_workspace_folder")
+            row = box.row(align=True)
+            row.enabled = _path_openable(_engine_output_dir_path(props))
+            row.operator("hy3d_local_connector.open_engine_output_folder")
+            row = box.row(align=True)
+            row.enabled = _path_openable(_hy3d_job_dir_path(props))
+            row.operator("hy3d_local_connector.open_hy3d_job_folder")
+            row = box.row(align=True)
+            row.enabled = _path_openable(_accepted_dir_path(props))
+            row.operator("hy3d_local_connector.open_accepted_folder")
+            row = box.row(align=True)
+            row.enabled = _path_openable(_validation_dir_path(props))
+            row.operator("hy3d_local_connector.open_validation_folder")
+            row = box.row(align=True)
+            row.enabled = _path_openable(_exports_dir_path(props))
+            row.operator("hy3d_local_connector.open_exports_folder")
             if props.last_status:
                 box.label(text=f"Last Status: {props.last_status}")
             if props.last_error:
@@ -693,10 +1210,20 @@ if BLENDER_AVAILABLE:  # pragma: no branch
         HY3D_LOCAL_CONNECTOR_OT_CheckLocalEngine,
         HY3D_LOCAL_CONNECTOR_OT_RunLocalTripoSR,
         HY3D_LOCAL_CONNECTOR_OT_ImportLocalResult,
+        HY3D_LOCAL_CONNECTOR_OT_ImportExistingResultPackage,
         HY3D_LOCAL_CONNECTOR_OT_ImportCandidateGLB,
+        HY3D_LOCAL_CONNECTOR_OT_ImportRepairedCandidateGLB,
+        HY3D_LOCAL_CONNECTOR_OT_ImportMeshFixCandidateGLB,
+        HY3D_LOCAL_CONNECTOR_OT_ImportMeshLabCandidateGLB,
         HY3D_LOCAL_CONNECTOR_OT_SaveBasicReview,
         HY3D_LOCAL_CONNECTOR_OT_AcceptSelectedObject,
         HY3D_LOCAL_CONNECTOR_OT_ExportSTLFromAccepted,
+        HY3D_LOCAL_CONNECTOR_OT_ValidateSTL,
+        HY3D_LOCAL_CONNECTOR_OT_OpenEngineOutputFolder,
+        HY3D_LOCAL_CONNECTOR_OT_OpenHY3DJobFolder,
+        HY3D_LOCAL_CONNECTOR_OT_OpenAcceptedFolder,
+        HY3D_LOCAL_CONNECTOR_OT_OpenValidationFolder,
+        HY3D_LOCAL_CONNECTOR_OT_OpenExportsFolder,
         HY3D_LOCAL_CONNECTOR_OT_OpenWorkspaceFolder,
         HY3D_LOCAL_CONNECTOR_PT_MainPanel,
     )
@@ -733,18 +1260,45 @@ __all__ = [
     "ENGINE_REPO",
     "ENGINE_ROOT",
     "ENGINE_VENV",
+    "EXPORTS_ROOT",
     "LOCAL_CONNECTOR_ROOT",
     "PROJECT_ROOT",
     "SAMPLE_INPUT",
+    "STATUS_ACCEPTED",
+    "STATUS_CANDIDATE_IMPORTED",
+    "STATUS_ENGINE_GENERATED",
+    "STATUS_IMPORTED_TO_HY3D",
+    "STATUS_NO_JOB",
+    "STATUS_STL_EXPORTED",
+    "STATUS_STL_VALIDATED",
     "VALID_IMAGE_SUFFIXES",
     "WRAPPER_RUN",
+    "_accepted_dir_path",
+    "_engine_output_dir_path",
+    "_exports_dir_path",
+    "_exports_job_dir",
     "_has_valid_accepted_model_path",
+    "_has_valid_light_candidate_path",
+    "_has_valid_meshfix_candidate_path",
+    "_has_valid_meshlab_candidate_path",
+    "_has_valid_repaired_candidate_path",
     "_import_result_package_into_session",
+    "_import_result_package_from_path",
+    "_hy3d_job_dir_path",
     "_local_engine_status",
+    "_local_engine_status_file_path",
+    "_path_openable",
     "_reset_session",
     "_resolve_existing_dir",
     "_resolve_existing_file",
+    "_validation_dir_path",
+    "_set_engine_generated_state",
+    "_set_imported_to_hy3d_state",
+    "_status_payload",
+    "_sync_exports_from_accepted",
     "_stl_export_ready",
+    "_validate_existing_stl",
+    "_validate_stl_ready",
     "_validate_primary_image",
     "_validate_result_package_path",
     "bl_info",

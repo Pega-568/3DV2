@@ -1138,3 +1138,280 @@ Estado honesto del smoke reforzado:
 - Reglas conservadas: `model.glb` nunca se usa para STL; la ruta soportada sigue siendo `accepted_model.glb -> accepted_model.stl`.
 - Errores encontrados en esta fase: ninguno nuevo en código o pruebas; el único error histórico relevante fue el BOM en `result_manifest.json`, ya corregido en el wrapper antes de esta integración.
 - Pendientes: instalar `E:\3DV4\dist\hy3d_local_connector_addon.zip` en Blender y ejecutar el smoke manual del panel/UI del add-on nuevo dentro de Blender.
+
+## Cierre de flujo GLB/STL
+
+- Estado: cerrado el flujo principal del conector local a nivel de contrato, archivos y pruebas.
+- Flujo objetivo cubierto: `imagen -> run_triposr_local.ps1 -> result_package.zip -> model.glb candidato -> Save Basic Review -> accepted_model.glb -> accepted_model.stl -> Validate STL`.
+- Botones mínimos presentes en `HY3D Local Connector`: `Self Check`, `Reset Session`, `Select Primary Image`, `Use Smoke Input`, `Check Local Engine`, `Run Local TripoSR`, `Import Local Result`, `Import Candidate GLB`, `Save Basic Review`, `Accept Selected Object`, `Export STL From Accepted`, `Validate STL`, `Open Workspace Folder`.
+- `Import Local Result`: reutiliza `import_result_package()` del core y deja `candidate_manifest.json` en `versions/v1/engine_output/` y `candidate_validation_report.json` en `versions/v1/validation/`.
+- `Accept Selected Object`: mantiene `source_type = selected_object` en `accepted_manifest.json` y el accepted sale a `versions/v1/accepted/accepted_model.glb`.
+- `Export STL From Accepted`: bloqueado sin `accepted_model.glb`; el STL solo sale a `versions/v1/accepted/accepted_model.stl`.
+- `Validate STL`: revalida `accepted_model.stl` y escribe `stl_validation_report.json` y `printability_report.json` en la carpeta `accepted/`.
+- Validación mínima STL cerrada: `exists`, `file_size`, `readable`, `component_count`, `bbox`, `watertight`, `manifold`, `printability_status`, con degradación honesta a `validation_unavailable` cuando no hay stack geométrico suficiente.
+- Dependencias opcionales: la validación usa `trimesh` cuando está disponible, intenta `pyvista` cuando está disponible y no bloquea todo si falta alguno.
+- Smoke de contrato ejecutado fuera de Blender:
+  - workspace: `E:\3DV4\hy3d_local_connector_workspace_smoke`
+  - job_id: `job_31e840aabde1`
+  - candidato: `E:\3DV4\hy3d_local_connector_workspace_smoke\jobs\job_31e840aabde1\versions\v1\engine_output\model.glb`
+  - accepted: `E:\3DV4\hy3d_local_connector_workspace_smoke\jobs\job_31e840aabde1\versions\v1\accepted\accepted_model.glb`
+  - stl: `E:\3DV4\hy3d_local_connector_workspace_smoke\jobs\job_31e840aabde1\versions\v1\accepted\accepted_model.stl`
+  - `accepted_manifest.json`: generado con `source_type = selected_object`
+  - `stl_validation_report.json`: generado
+  - `printability_status` del smoke: `needs_cleanup`
+- Pruebas realizadas:
+  - `pytest -q hy3d_v2/tests/test_phase1_flow.py hy3d_v2/tests/test_local_connector_addon.py` -> `20 passed in 4.26s`
+  - `pytest -q hy3d_v2/tests` -> `56 passed in 5.07s`
+  - empaquetado regenerado: `E:\3DV4\dist\hy3d_local_connector_addon.zip`
+  - contenido verificado del ZIP: solo `hy3d_local_connector/__init__.py`
+- Errores encontrados en esta fase: ninguno nuevo durante el cierre GLB/STL.
+- Pendientes:
+  - smoke manual dentro de Blender para confirmar el flujo UI completo del objeto seleccionado real
+  - validación visual del candidato y del accepted dentro de la sesión Blender
+
+## Mesh Quality Gate
+
+- Estado: implementado sobre el candidato `model.glb` antes de cualquier aceptación.
+- Reporte nuevo: `versions/v1/validation/mesh_quality_report.json`
+- Campos cubiertos: `readable`, `vertices`, `faces`, `components`, `watertight`, `non_manifold_edges`, `boundary_edges`, `bbox`, `flatness_score`, `hole_warning`, `disconnected_parts_warning`, `repair_recommended`, `repair_strategy`.
+- Dependencias usadas:
+  - `trimesh`: lectura principal, métricas geométricas y reparación ligera.
+  - `pyvista`: lectura y fallback de métricas cuando aporta datos adicionales.
+  - `pymeshfix`: no estaba instalado en esta máquina durante esta fase; el gate lo declara en `repair_strategy` y no falla por su ausencia.
+- Regla aplicada: si `repair_recommended = true`, el sistema genera `repaired_candidate.glb` como candidato alternativo en `versions/v1/engine_output/repaired_candidate.glb`. Nunca se promociona a `accepted_model.glb` automáticamente.
+- Comparación habilitada en el add-on local:
+  - `Import Candidate GLB` para `model.glb`
+  - `Import Repaired Candidate GLB` para `repaired_candidate.glb`
+  - Ninguno se acepta automáticamente.
+- Smoke real del gate sobre `E:\3D_ENGINES\triposr-local\outputs\job_test\result_package.zip`:
+  - workspace: `E:\3DV4\hy3d_local_connector_mesh_gate_smoke`
+  - job_id: `job_33130767d4c2`
+  - `mesh_quality_report.json`: generado
+  - `repair_recommended`: `true`
+  - `repaired_candidate.glb`: `E:\3DV4\hy3d_local_connector_mesh_gate_smoke\jobs\job_33130767d4c2\versions\v1\engine_output\repaired_candidate.glb`
+  - `repair_strategy`: `trimesh_light_repair+pymeshfix_unavailable`
+- Pruebas realizadas:
+  - `pytest -q hy3d_v2/tests/test_phase1_flow.py hy3d_v2/tests/test_local_connector_addon.py` -> `23 passed in 6.44s`
+  - `pytest -q hy3d_v2/tests` -> `59 passed in 9.10s`
+- Bitácora:
+  - `hy3d_v2/hy3d_core/validation/service.py`
+    Motivo: incorporar el Mesh Quality Gate, edge stats, flatness, advertencias, reparación ligera y exportación opcional de `repaired_candidate.glb`.
+  - `hy3d_v2/hy3d_core/job_service.py`
+    Motivo: generar `mesh_quality_report.json`, exponer `repair_recommended` y `repaired_candidate_path` en `candidate_manifest.json`.
+  - `hy3d_local_connector_addon/hy3d_local_connector/__init__.py`
+    Motivo: poblar `repaired_candidate_path` y añadir `Import Repaired Candidate GLB` para comparar candidato original vs reparado sin aceptación automática.
+  - `hy3d_v2/tests/test_phase1_flow.py`, `hy3d_v2/tests/test_local_connector_addon.py`
+    Motivo: cubrir el gate con un mesh roto sintético, la creación de `repaired_candidate.glb` y la propagación del nuevo path al conector local.
+
+## Engine Output vs HY3D Workspace
+
+- Problema operativo cerrado: un job puede existir primero solo como salida del motor en `E:\3D_ENGINES\triposr-local\outputs\job_<id>` y todavía no existir como job importado dentro del workspace HY3D.
+- Separación explícita establecida:
+  - salida del motor: `E:\3D_ENGINES\triposr-local\outputs\job_<id>`
+  - job importado a HY3D: `E:\3DV4\hy3d_local_connector_workspace\jobs\job_<hy3d_id>\versions\v1\...`
+  - modelo aceptado: `...\accepted\accepted_model.glb`
+  - STL final: `...\accepted\accepted_model.stl`
+- Estados agregados al conector local:
+  - `no_job`
+  - `engine_generated`
+  - `imported_to_hy3d`
+  - `candidate_imported`
+  - `accepted`
+  - `stl_exported`
+  - `stl_validated`
+- Archivo nuevo de trazabilidad: `local_engine_status.json`
+  - ubicación: dentro de la carpeta del motor `E:\3D_ENGINES\triposr-local\outputs\job_<id>\local_engine_status.json`
+  - campos principales: `engine_job_id`, `engine_output_dir`, `result_package_path`, `hy3d_imported`, `hy3d_job_id`, `accepted_model_path`, `stl_path`, `stl_validation_report_path`, `printability_report_path`, `exports_folder`, `status`
+- Después de `Run Local TripoSR`:
+  - se guarda `engine_job_id`
+  - se guarda `engine_output_dir`
+  - se guarda `result_package_path`
+  - estado: `engine_generated`
+  - mensaje UI: `Result package generated. Next step: Import Local Result.`
+- Después de `Import Local Result` o `Import Existing Result Package`:
+  - se crea el job HY3D en el workspace
+  - `local_engine_status.json` cambia a `hy3d_imported = true`
+  - se registra `hy3d_job_id`
+  - estado: `imported_to_hy3d`
+- Después de `Import Candidate GLB` o `Import Repaired Candidate GLB`:
+  - estado: `candidate_imported`
+- Después de `Accept Selected Object`:
+  - estado: `accepted`
+  - se registra `accepted_model_path`
+- Después de `Export STL From Accepted`:
+  - estado: `stl_exported`
+  - se registra `stl_path`
+  - se copian artefactos al directorio fácil `E:\3DV4\HY3D_EXPORTS\job_<engine_job_id>\`
+- Después de `Validate STL`:
+  - estado: `stl_validated`
+  - se registran `stl_validation_report_path` y `printability_report_path`
+- Botones nuevos del add-on:
+  - `Import Existing Result Package`
+  - `Open Engine Output Folder`
+  - `Open HY3D Job Folder`
+  - `Open Accepted Folder`
+  - `Open Exports Folder`
+- UI nueva visible:
+  - `Current Status`
+  - `Engine Output Folder`
+  - `Result Package Path`
+  - `HY3D Job Folder`
+  - `Accepted Model Path`
+  - `STL Path`
+  - `Exports Folder`
+- Cómo localizar el STL final:
+  - ruta canónica del workflow: `E:\3DV4\hy3d_local_connector_workspace\jobs\job_<hy3d_id>\versions\v1\accepted\accepted_model.stl`
+  - copia fácil para entrega/inspección: `E:\3DV4\HY3D_EXPORTS\job_<engine_job_id>\accepted_model.stl`
+- Verificación real con un job del motor existente:
+  - job del motor: `job_c8823241e9a5`
+  - output del motor: `E:\3D_ENGINES\triposr-local\outputs\job_c8823241e9a5`
+  - smoke de importación a workspace temporal: `E:\3DV4\hy3d_local_connector_status_smoke`
+  - resultado: `local_engine_status.json` quedó en `status = imported_to_hy3d`, `hy3d_imported = true`, `hy3d_job_id = job_5bbbd41d7c1c`
+- Nueva carpeta de exportación fácil:
+  - raíz: `E:\3DV4\HY3D_EXPORTS`
+  - destino por job: `E:\3DV4\HY3D_EXPORTS\job_<engine_job_id>\`
+  - contenido copiado al exportar STL: `accepted_model.stl`, `accepted_model.glb`, `stl_validation_report.json`, `printability_report.json`
+- Pruebas realizadas:
+  - `pytest -q hy3d_v2/tests/test_local_connector_addon.py` -> `15 passed in 5.56s`
+  - `pytest -q hy3d_v2/tests` -> `63 passed in 8.02s`
+  - smoke real de trazabilidad con `job_c8823241e9a5` -> importación correcta a workspace temporal y actualización real de `local_engine_status.json`
+- Errores encontrados:
+  - durante la implementación, `_sync_exports_from_accepted()` dependía solo del workspace; se corrigió para derivar la carpeta `accepted` directamente desde `accepted_model_path` cuando ya existe.
+- Pendientes:
+  - smoke manual dentro de Blender para validar visualmente los botones nuevos de apertura de carpetas y rescate de packages existentes
+  - validación manual del flujo de exportación hacia `HY3D_EXPORTS` desde una sesión Blender real
+- Bitácora:
+  - `hy3d_local_connector_addon/hy3d_local_connector/__init__.py`
+    Motivo: separar `engine_job_id` de `hy3d_job_id`, introducir estados explícitos, `local_engine_status.json`, rescate manual de `result_package.zip`, botones de apertura y copia a `HY3D_EXPORTS`.
+  - `hy3d_v2/tests/test_local_connector_addon.py`
+    Motivo: cubrir `engine_generated`, `Import Existing Result Package`, actualizaciones de `local_engine_status.json`, validez de carpetas abiertas, copia a `HY3D_EXPORTS` y bloqueo de STL antes de `accepted`.
+
+## Portabilidad y trazabilidad local
+
+- Estado: el add-on `HY3D Local Connector` ya no depende de rutas absolutas `E:\` para resolver proyecto, motor, wrapper o exports.
+- Orden de resolución de configuración:
+  1. variables de entorno: `HY3D_PROJECT_ROOT`, `HY3D_ENGINE_ROOT`, `HY3D_WRAPPER_RUN`, `HY3D_EXPORTS_ROOT`
+  2. archivo local opcional `hy3d_local_config.json` en la raíz del repo
+  3. rutas relativas al checkout actual
+- `hy3d_local_config.json` es configuración de máquina local y queda ignorado por git.
+- Defaults relativos:
+  - `HY3D_PROJECT_ROOT`: `<repo>/hy3d_v2`
+  - `HY3D_ENGINE_ROOT`: `<parent-del-repo>/3D_ENGINES/triposr-local`
+  - `HY3D_WRAPPER_RUN`: `<parent-del-engine>/wrappers/run_triposr_local.ps1`
+  - `HY3D_EXPORTS_ROOT`: `<repo>/HY3D_EXPORTS`
+- `local_engine_status.json` mantiene los estados permitidos:
+  - `no_job`
+  - `engine_generated`
+  - `imported_to_hy3d`
+  - `candidate_imported`
+  - `accepted`
+  - `stl_exported`
+  - `stl_validated`
+- `Import Local Result` ya no queda bloqueado por `job_id` vacío. Si existe `result_package.zip` y hay imagen primaria o fallback `engine_raw/0/input.png`, crea/asocia el job HY3D y luego importa el resultado.
+- `Import Existing Result Package` mantiene el mismo contrato: requiere un ZIP válido y crea un job HY3D local si no hay uno asociado.
+- Al exportar STL desde el accepted, el conector copia a `HY3D_EXPORTS/job_<id>/`:
+  - `accepted_model.glb`
+  - `accepted_model.stl`
+  - `stl_validation_report.json`
+  - `printability_report.json`
+- Reglas conservadas:
+  - `model.glb` no produce STL.
+  - `repaired_candidate.glb` no produce STL.
+  - solo `accepted_model.glb` puede producir `accepted_model.stl`.
+  - `repaired_candidate.glb` nunca se acepta automáticamente.
+- Higiene de repositorio:
+  - `__pycache__`, `.pyc`, workspaces, outputs de motor, `HY3D_EXPORTS`, ZIPs de distribución y `hy3d_local_config.json` quedan ignorados.
+  - Se conserva `hy3d_v2/test_assets/result_package_sample.zip` como fixture mínimo de pruebas.
+- Pruebas realizadas:
+  - `python -m pytest hy3d_v2/tests -q` -> `62 passed, 1 skipped`
+- Bitácora:
+  - `.gitignore`
+    Motivo: impedir versionado de cachés, workspaces, outputs, exports, configuración local y artefactos de distribución.
+  - `hy3d_local_connector_addon/hy3d_local_connector/__init__.py`
+    Motivo: resolver configuración por entorno/config local/defaults relativos, registrar rutas efectivas en self-check, desbloquear importación local sin `job_id` previo y mantener copia de exports por job.
+  - `hy3d_v2_clean_addon/hy3d_v2_clean/__init__.py`
+    Motivo: resolver assets de muestra desde el checkout actual en vez de una ruta absoluta de máquina.
+  - `hy3d_v2/tests/test_local_connector_addon.py`
+    Motivo: reemplazar dependencias de `E:\3D_ENGINES` por fixtures temporales y assets locales.
+
+## Mesh Repair & Quality Benchmark
+
+- Estado: implementado sin cambiar el contrato central GLB/STL.
+- Reglas conservadas:
+  - `model.glb` sigue siendo el candidato original.
+  - ningún candidato reparado se acepta automáticamente.
+  - ningún candidato reparado puede exportar STL directamente.
+  - solo `accepted_model.glb` puede generar `accepted_model.stl`.
+  - no se cambia el motor de generación.
+- Reporte principal extendido: `versions/<version_id>/validation/mesh_quality_report.json`
+  - `exists`
+  - `file_size`
+  - `readable_by_trimesh`
+  - `readable_by_pyvista`
+  - `vertex_count`
+  - `face_count`
+  - `bbox`
+  - `component_count`
+  - `watertight`
+  - `winding_consistent`
+  - `euler_number`
+  - `non_empty`
+  - `repair_recommended`
+  - `validation_warnings`
+- Capa nueva: `hy3d_core/repair/service.py`
+- Reparación ligera con Trimesh:
+  - genera `versions/<version_id>/engine_output/repaired_candidate_light.glb` cuando corresponde y Trimesh puede procesar la malla.
+  - genera `versions/<version_id>/validation/repair_report_light.json` siempre.
+  - operaciones intentadas según disponibilidad de la versión instalada: `remove_duplicate_faces`, `remove_degenerate_faces`, `remove_unreferenced_vertices`, `merge_vertices`, `fix_normals`, `fill_holes`.
+- Reparación opcional con PyMeshFix:
+  - si `pymeshfix` está disponible, intenta generar `repaired_candidate_meshfix.glb`.
+  - si no está disponible, `repair_report_meshfix.json` registra `pymeshfix_unavailable`.
+  - el flujo no falla por ausencia de PyMeshFix.
+- Reparación opcional con PyMeshLab:
+  - si `pymeshlab` está disponible, intenta generar `repaired_candidate_meshlab.glb`.
+  - si no está disponible, `repair_report_meshlab.json` registra `pymeshlab_unavailable`.
+  - el flujo no falla por ausencia de PyMeshLab.
+- Comparación generada:
+  - `versions/<version_id>/validation/repair_comparison_report.json`
+  - compara `original`, `light`, `meshfix`, `meshlab`.
+  - métricas: existencia, tamaño, componentes, watertight, caras, vértices y warnings.
+- Integración en `import_result_package()`:
+  - primero extrae y valida `model.glb`.
+  - luego genera `mesh_quality_report.json`.
+  - luego ejecuta el benchmark de reparación.
+  - `candidate_manifest.json` incluye:
+    - `repaired_candidate_light_path`
+    - `repaired_candidate_meshfix_path`
+    - `repaired_candidate_meshlab_path`
+    - `repaired_candidate_paths`
+    - `repair_report_paths`
+  - el estado del job queda en revisión de candidato, no en accepted.
+- Add-on local:
+  - muestra rutas para original, light, meshfix y meshlab.
+  - botones:
+    - `Import Original Candidate GLB`
+    - `Import Light Repaired Candidate`
+    - `Import MeshFix Candidate`
+    - `Import MeshLab Candidate`
+    - `Open Validation Folder`
+  - cada importación marca objetos con:
+    - `hy3d_role = candidate`
+    - `hy3d_candidate_type = original/light/meshfix/meshlab`
+    - `hy3d_job_id`
+- Pruebas realizadas:
+  - `python -m pytest hy3d_v2/tests -q` -> `62 passed, 1 skipped`
+- Bitácora:
+  - `hy3d_v2/hy3d_core/validation/service.py`
+    Motivo: ampliar métricas de calidad y mantener degradación por dependencias opcionales.
+  - `hy3d_v2/hy3d_core/repair/service.py`
+    Motivo: añadir reparación ligera, backends opcionales y comparación de variantes.
+  - `hy3d_v2/hy3d_core/repair/__init__.py`
+    Motivo: exponer `run_repair_benchmark`.
+  - `hy3d_v2/hy3d_core/job_service.py`
+    Motivo: integrar benchmark después de importar `model.glb` y registrar rutas/reportes en `candidate_manifest.json`.
+  - `hy3d_local_connector_addon/hy3d_local_connector/__init__.py`
+    Motivo: añadir rutas y botones para importar variantes reparadas como candidatos, no como accepted.
+  - `hy3d_v2/tests/test_phase1_flow.py`
+    Motivo: cubrir reportes, degradación opcional, manifest y bloqueo STL desde candidatos.
+  - `hy3d_v2/tests/test_local_connector_addon.py`
+    Motivo: cubrir helpers/rutas del add-on para variantes reparadas.
