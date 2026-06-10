@@ -1447,6 +1447,73 @@ Estado honesto del smoke reforzado:
   - modo packages con ZIP existente.
   - paths relativos al workspace y sin rutas absolutas locales.
 
+## Fase 4 - Input quality y perfiles de reparación
+
+- Estado: implementado sin cambiar de motor y sin aceptar candidatos automáticamente.
+- Módulo nuevo: `hy3d_v2/hy3d_core/input_quality/service.py`
+- Función principal: `analyze_input_image(image_path)`
+- Reporte nuevo por job: `versions/<version_id>/validation/input_quality_report.json`
+- Campos del reporte:
+  - `image_path`
+  - `exists`
+  - `file_size`
+  - `width`
+  - `height`
+  - `mode`
+  - `aspect_ratio`
+  - `has_alpha`
+  - `is_too_small`
+  - `is_square_or_near_square`
+  - `contrast_score`
+  - `estimated_background_complexity`
+  - `input_quality_status`
+  - `warnings`
+- Integración en `create_job()`:
+  - copia la imagen primaria al job.
+  - analiza la copia local.
+  - escribe `input_quality_report.json`.
+  - registra `input_quality_status`, `input_quality_warnings` e `input_quality_report_path` en `job_manifest.json`.
+  - propaga warnings al `multi_view_validation_report.json`.
+- Regla operativa:
+  - archivo inexistente o formato no soportado siguen bloqueados antes de crear job.
+  - imágenes pequeñas, bajo contraste, fondo complejo o formato no cuadrado quedan como advertencias para no romper el flujo local ya validado.
+- Perfiles de reparación agregados:
+  - `safe_light`: default.
+  - `visual_preserve`: evita cerrar agujeros para preservar cavidades visibles.
+  - `printability`: prioriza watertight/manifold cuando la herramienta disponible lo permite.
+  - `aggressive_close_holes`: registra advertencia fuerte porque puede cerrar cavidades reales.
+- Reportes de reparación extendidos:
+  - `repair_profile`
+  - `operations_applied`
+  - `warnings`
+  - `before_metrics`
+  - `after_metrics`
+  - `technical_recommendation`
+  - `no_auto_acceptance: true`
+- `repair_comparison_report.json` ahora registra el perfil usado, operaciones, warnings agregados y recomendación técnica.
+- Integración en `import_result_package()`:
+  - parámetro opcional `repair_profile`, default `safe_light`.
+  - `candidate_manifest.json` conserva rutas de candidatos reparados e incluye `repair_profile`.
+- Add-on `HY3D Local Connector`:
+  - muestra estado y warnings de input quality.
+  - guarda esos datos en `local_engine_status.json`.
+  - expone selector `Repair Profile`.
+  - pasa el perfil seleccionado al importar el resultado.
+- Reglas conservadas:
+  - `model.glb` sigue siendo candidato original.
+  - `repaired_candidate_light.glb`, `repaired_candidate_meshfix.glb` y `repaired_candidate_meshlab.glb` siguen siendo candidatos reparados.
+  - ningún candidato reparado se acepta automáticamente.
+  - ningún candidato reparado exporta STL.
+  - solo `accepted_model.glb` puede producir `accepted_model.stl`.
+- Pruebas agregadas:
+  - imagen válida.
+  - imagen pequeña.
+  - generación de `input_quality_report.json` desde `create_job()`.
+  - reportes perfilados de reparación.
+  - registro de perfil en `candidate_manifest.json` y `repair_comparison_report.json`.
+  - bloqueo de STL sin accepted.
+  - propagación del perfil desde el conector local.
+
 ## Fase 2 - Smoke Blender y limpieza de escena
 
 - Estado: parcialmente implementado fuera de Blender; smoke manual pendiente.

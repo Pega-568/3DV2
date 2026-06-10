@@ -69,6 +69,7 @@ from hy3d_v2.hy3d_core.job_service import (  # noqa: E402
     promote_selected_object_to_accepted,
     save_manual_review,
 )
+from hy3d_v2.hy3d_core.input_quality.service import analyze_input_image  # noqa: E402
 from hy3d_v2.hy3d_core.models import ReviewPayload  # noqa: E402
 from hy3d_v2.hy3d_core.stl.service import validate_stl_file  # noqa: E402
 from hy3d_v2.hy3d_core.utils.files import read_json, utc_now_iso, write_json  # noqa: E402
@@ -316,6 +317,9 @@ def _status_payload(props) -> dict[str, object]:
         "stl_validation_report_path": _normalize_path_string(getattr(props, "stl_validation_report_path", "")) or None,
         "printability_report_path": _normalize_path_string(getattr(props, "printability_report_path", "")) or None,
         "exports_folder": _normalize_path_string(getattr(props, "exports_dir", "")) or None,
+        "input_quality_status": str(getattr(props, "input_quality_status", "") or ""),
+        "input_quality_warnings": str(getattr(props, "input_quality_warnings", "") or ""),
+        "repair_profile": str(getattr(props, "repair_profile", "safe_light") or "safe_light"),
         "status": getattr(props, "current_status", STATUS_NO_JOB),
     }
 
@@ -425,6 +429,7 @@ def _import_result_package_from_path(props, package_path: Path) -> dict:
     if not getattr(props, "engine_job_id", "").strip():
         props.engine_job_id = package_path.parent.name
     manifest = create_job(workspace_root(), primary_image)
+    _load_input_quality_into_props(props, manifest["job_id"], "v1")
     props.version_id = "v1"
     _set_imported_to_hy3d_state(props, manifest["job_id"])
     imported_manifest = _import_result_package_into_session(props, package_path)
@@ -449,6 +454,9 @@ def _reset_session(props) -> None:
     props.stl_validation_report_path = ""
     props.printability_report_path = ""
     props.exports_dir = ""
+    props.input_quality_status = ""
+    props.input_quality_warnings = ""
+    props.input_quality_report_path = ""
     props.hy3d_imported = False
     props.current_status = STATUS_NO_JOB
     props.self_check_status = ""
@@ -472,8 +480,32 @@ def _is_hy3d_scene_object(obj) -> bool:
         return False
 
 
+def _input_quality_summary(image_path: Path) -> tuple[str, str]:
+    report = analyze_input_image(image_path)
+    return str(report.get("input_quality_status") or "unknown"), ", ".join(report.get("warnings", []))
+
+
+def _load_input_quality_into_props(props, job_id: str, version_id: str) -> None:
+    report_path = build_job_paths(workspace_root(), job_id, version_id).manifests["input_quality"]
+    props.input_quality_report_path = str(report_path)
+    if not report_path.exists():
+        return
+    try:
+        report = read_json(report_path)
+    except Exception:
+        return
+    props.input_quality_status = str(report.get("input_quality_status") or "")
+    props.input_quality_warnings = ", ".join(report.get("warnings", []))
+
+
 def _import_result_package_into_session(props, package_path: Path) -> dict:
-    manifest = import_result_package(workspace_root(), props.job_id, package_path, version_id=props.version_id or "v1")
+    manifest = import_result_package(
+        workspace_root(),
+        props.job_id,
+        package_path,
+        version_id=props.version_id or "v1",
+        repair_profile=getattr(props, "repair_profile", "safe_light") or "safe_light",
+    )
     props.result_package_path = str(package_path)
     props.candidate_model_path = manifest["candidate_path"]
     props.repaired_candidate_path = str(manifest.get("repaired_candidate_path") or "")
@@ -484,6 +516,7 @@ def _import_result_package_into_session(props, package_path: Path) -> dict:
     props.accepted_stl_path = ""
     props.stl_validation_report_path = ""
     props.printability_report_path = ""
+    _load_input_quality_into_props(props, props.job_id, props.version_id or "v1")
     _write_local_engine_status(props)
     return manifest
 
@@ -562,6 +595,19 @@ if BLENDER_AVAILABLE:  # pragma: no branch
         stl_validation_report_path: StringProperty(name="STL Validation Report Path", default="")
         printability_report_path: StringProperty(name="Printability Report Path", default="")
         exports_dir: StringProperty(name="Exports Dir", default="")
+        input_quality_status: StringProperty(name="Input Quality Status", default="")
+        input_quality_warnings: StringProperty(name="Input Quality Warnings", default="")
+        input_quality_report_path: StringProperty(name="Input Quality Report Path", default="")
+        repair_profile: EnumProperty(
+            name="Repair Profile",
+            items=[
+                ("safe_light", "Safe Light", ""),
+                ("visual_preserve", "Visual Preserve", ""),
+                ("printability", "Printability", ""),
+                ("aggressive_close_holes", "Aggressive Close Holes", ""),
+            ],
+            default="safe_light",
+        )
         current_status: StringProperty(name="Current Status", default=STATUS_NO_JOB)
         hy3d_imported: BoolProperty(name="HY3D Imported", default=False)
         self_check_status: StringProperty(name="Self Check Status", default="")
@@ -685,6 +731,15 @@ if BLENDER_AVAILABLE:  # pragma: no branch
             if primary_image is None:
                 self.report({"ERROR"}, error or "Primary image is invalid.")
                 return {"CANCELLED"}
+            quality_status, quality_warnings = _input_quality_summary(primary_image)
+            props.input_quality_status = quality_status
+            props.input_quality_warnings = quality_warnings
+            if quality_status == "error":
+                props.last_error = quality_warnings or "Input image quality check failed."
+                self.report({"ERROR"}, props.last_error)
+                return {"CANCELLED"}
+            if quality_warnings:
+                props.last_error = f"Input warning: {quality_warnings}"
 
             engine_job_id = _new_engine_job_id()
             props.version_id = "v1"
@@ -1139,6 +1194,10 @@ if BLENDER_AVAILABLE:  # pragma: no branch
             box = layout.box()
             box.label(text="Input")
             box.prop(props, "primary_image_path", text="Primary Image")
+            if props.input_quality_status:
+                box.label(text=f"Input Quality: {props.input_quality_status}")
+            if props.input_quality_warnings:
+                box.label(text=f"Input Warnings: {props.input_quality_warnings}")
             row = box.row(align=True)
             row.operator("hy3d_local_connector.select_primary_image")
             row.operator("hy3d_local_connector.use_smoke_input")
@@ -1155,6 +1214,7 @@ if BLENDER_AVAILABLE:  # pragma: no branch
 
             box = layout.box()
             box.label(text="Candidate")
+            box.prop(props, "repair_profile")
             row = box.row()
             row.enabled = _has_valid_candidate_model_path(props)
             row.operator("hy3d_local_connector.import_candidate_glb")
@@ -1202,6 +1262,7 @@ if BLENDER_AVAILABLE:  # pragma: no branch
             box.label(text=f"Accepted: {props.accepted_model_path or '(none)'}")
             box.label(text=f"STL Path: {props.accepted_stl_path or '(none)'}")
             box.label(text=f"Exports Folder: {props.exports_dir or '(none)'}")
+            box.label(text=f"Input Quality Report: {props.input_quality_report_path or '(none)'}")
             box.operator("hy3d_local_connector.open_workspace_folder")
             row = box.row(align=True)
             row.enabled = _path_openable(_engine_output_dir_path(props))

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from .models import JobPaths, ReferenceView, ReviewPayload
+from .input_quality.service import analyze_input_image
 from .repair.service import run_repair_benchmark
 from .stl.service import export_glb_to_stl, validate_stl_file
 from .utils.files import copy_file, ensure_dir, read_json, utc_now_iso, write_json
@@ -84,6 +85,7 @@ def build_job_paths(root: Path, job_id: str, version_id: str = "v1") -> JobPaths
         "multi_view_validation": paths.multi_view_dir / "multi_view_validation_report.json",
         "selected_primary": paths.multi_view_dir / "selected_primary_view.json",
         "source_type": version_dir / "source" / "source_type.json",
+        "input_quality": paths.validation_dir / "input_quality_report.json",
         "manual_review": paths.blender_review_dir / "manual_review.json",
         "candidate_manifest": paths.engine_output_dir / "candidate_manifest.json",
         "edited_manifest": paths.edited_dir / "edited_manifest.json",
@@ -141,6 +143,8 @@ def create_job(
 
     primary_dst = copy_file(primary_image, paths.input_dir / f"primary_image{primary_image.suffix.lower()}")
     reference_entries = _copy_reference_views(paths.input_dir / "original_uploads", reference_views)
+    input_quality_report = analyze_input_image(primary_dst)
+    write_json(paths.manifests["input_quality"], input_quality_report)
 
     if prompt:
         (paths.instructions_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
@@ -153,6 +157,7 @@ def create_job(
             "source_type": "image_to_3d",
             "input_mode": input_mode,
             "primary_image": str(source_input_dst.relative_to(paths.job_dir)).replace("\\", "/"),
+            "input_quality_report_path": str(paths.manifests["input_quality"].relative_to(paths.job_dir)).replace("\\", "/"),
         },
     )
 
@@ -162,6 +167,9 @@ def create_job(
         "status": "awaiting_external_generation",
         "active_version": "v1",
         "active_accepted_version": None,
+        "input_quality_status": input_quality_report.get("input_quality_status"),
+        "input_quality_warnings": input_quality_report.get("warnings", []),
+        "input_quality_report_path": str(paths.manifests["input_quality"]),
         "versions": [
             {
                 "version_id": "v1",
@@ -186,7 +194,7 @@ def create_job(
             "primary_image": f"input/{primary_dst.name}",
             "reference_views": reference_entries,
             "accepted_for_generation": True,
-            "warnings": [],
+            "warnings": input_quality_report.get("warnings", []),
         },
     )
     write_json(
@@ -233,7 +241,7 @@ def _update_version_status(job_manifest: dict, version_id: str, status: str) -> 
             break
 
 
-def import_result_package(root: Path, job_id: str, result_package: Path, version_id: str = "v1") -> dict:
+def import_result_package(root: Path, job_id: str, result_package: Path, version_id: str = "v1", repair_profile: str = "safe_light") -> dict:
     root = _validate_workspace_root(root)
     paths = build_job_paths(root, job_id, version_id)
     if str(result_package).strip() in {"", "."}:
@@ -260,7 +268,7 @@ def import_result_package(root: Path, job_id: str, result_package: Path, version
 
     report = validate_candidate_glb(candidate_path)
     mesh_quality_report = analyze_mesh_quality(candidate_path)
-    repair_benchmark = run_repair_benchmark(candidate_path, paths.engine_output_dir, paths.validation_dir)
+    repair_benchmark = run_repair_benchmark(candidate_path, paths.engine_output_dir, paths.validation_dir, repair_profile=repair_profile)
     repaired_candidate_paths = repair_benchmark["paths"]
     repaired_candidate_reports = repair_benchmark["report_paths"]
     candidate_manifest = {
@@ -278,6 +286,7 @@ def import_result_package(root: Path, job_id: str, result_package: Path, version
         "mesh_quality_report_path": str(paths.validation_dir / "mesh_quality_report.json"),
         "repair_report_paths": repaired_candidate_reports,
         "repair_recommended": bool(mesh_quality_report.get("repair_recommended")),
+        "repair_profile": repair_benchmark["repair_profile"],
         "result_manifest_path": str(result_manifest_path),
         "result_manifest_version": result_manifest.get("result_package_version"),
         "extracted_files": [str(path) for path in extracted],
