@@ -1416,6 +1416,37 @@ Estado honesto del smoke reforzado:
   - `hy3d_v2/tests/test_local_connector_addon.py`
     Motivo: cubrir helpers/rutas del add-on para variantes reparadas.
 
+## Fase 3 - Benchmark de calidad real
+
+- Estado: implementado como herramienta repetible sin depender de TripoSR real.
+- Script principal: `hy3d_v2/scripts/run_quality_benchmark.py`
+- Entradas recomendadas: `hy3d_v2/benchmark_inputs/README_BENCHMARK_INPUTS.md`
+- Plantilla manual versionada: `hy3d_v2/benchmark_reports/manual_review_template.csv`
+- Outputs generados localmente e ignorados por Git:
+  - `hy3d_v2/benchmark_reports/benchmark_summary.json`
+  - `hy3d_v2/benchmark_reports/benchmark_summary.csv`
+  - `hy3d_v2/benchmark_reports/_benchmark_workspace/`
+- Modo fixture sin motor:
+  - `python hy3d_v2/scripts/run_quality_benchmark.py --mode fixture --clean-workspace --workspace-root hy3d_v2/benchmark_reports/_benchmark_workspace`
+- Modo paquetes existentes:
+  - `python hy3d_v2/scripts/run_quality_benchmark.py --mode packages --packages-dir <folder_con_result_packages> --clean-workspace --workspace-root hy3d_v2/benchmark_reports/_benchmark_workspace`
+- Modo wrapper local:
+  - existe como modo explícito `wrapper`, pero queda desactivado por defecto y exige `--enable-wrapper` más `HY3D_WRAPPER_RUN`.
+- Campos del summary:
+  - `input_name`, `job_id`, `version_id`, rutas de candidato original/reparados, rutas de reportes, existencia de cada variante, métricas originales, watertight por variante, `repair_recommended`, warnings y campos manuales editables.
+- Reglas conservadas:
+  - `model.glb` sigue siendo candidato original.
+  - `repaired_candidate_light.glb`, `repaired_candidate_meshfix.glb` y `repaired_candidate_meshlab.glb` siguen siendo candidatos reparados.
+  - ningún candidato se acepta automáticamente.
+  - ningún candidato original o reparado exporta STL.
+  - solo `accepted_model.glb` puede producir `accepted_model.stl`.
+- Pruebas agregadas:
+  - generación de summary JSON.
+  - generación de CSV.
+  - modo fixture sin motor.
+  - modo packages con ZIP existente.
+  - paths relativos al workspace y sin rutas absolutas locales.
+
 ## Fase 2 - Smoke Blender y limpieza de escena
 
 - Estado: parcialmente implementado fuera de Blender; smoke manual pendiente.

@@ -31,4 +31,5 @@ engine_output/
 blender_debug_output.txt
 blender.crash.txt
 
-hy3d_v2/benchmark_reports/
+hy3d_v2/benchmark_reports/*
+!hy3d_v2/benchmark_reports/manual_review_template.csv
