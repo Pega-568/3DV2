@@ -5,46 +5,89 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import uuid
 from datetime import datetime
 from pathlib import Path
+from urllib import error as urlerror
+from urllib import request as urlrequest
 
 MODULE_ROOT = Path(__file__).resolve().parent
 ADDON_ROOT = MODULE_ROOT.parent
 REPO_ROOT = ADDON_ROOT.parent
-LOCAL_CONFIG_PATH = REPO_ROOT / "hy3d_local_config.json"
 
 
-def _load_local_config() -> dict[str, str]:
-    if not LOCAL_CONFIG_PATH.exists():
+def _read_bootstrap_config(path: Path) -> dict[str, str]:
+    if not path.exists() or not path.is_file():
         return {}
     try:
-        payload = json.loads(LOCAL_CONFIG_PATH.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return {}
     if not isinstance(payload, dict):
         return {}
-    return {str(key): str(value) for key, value in payload.items() if value}
+    return {str(key): str(value) for key, value in payload.items() if value is not None and str(value).strip()}
 
 
-_LOCAL_CONFIG = _load_local_config()
+def _resolve_bootstrap_path(value: str, base_dir: Path) -> Path:
+    expanded = os.path.expandvars(os.path.expanduser(str(value).strip().strip('"').strip("'")))
+    path = Path(expanded)
+    if path.is_absolute():
+        return path
+    return (base_dir / path).resolve()
 
 
-def _configured_path(env_name: str, config_key: str, fallback: Path) -> Path:
-    value = os.environ.get(env_name) or _LOCAL_CONFIG.get(config_key) or _LOCAL_CONFIG.get(env_name)
-    if value:
-        return Path(value).expanduser()
-    return fallback
+def _bootstrap_config_path() -> Path | None:
+    candidates = []
+    if os.environ.get("HY3D_CONFIG_PATH"):
+        candidates.append(Path(os.environ["HY3D_CONFIG_PATH"]).expanduser())
+    candidates.extend(
+        [
+            MODULE_ROOT / "hy3d_local_config.json",
+            ADDON_ROOT / "hy3d_local_config.json",
+            REPO_ROOT / "hy3d_local_config.json",
+        ]
+    )
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
 
 
-PROJECT_ROOT = _configured_path("HY3D_PROJECT_ROOT", "project_root", REPO_ROOT / "hy3d_v2")
+_BOOTSTRAP_ROOTS = [REPO_ROOT]
+_BOOTSTRAP_CONFIG_PATH = _bootstrap_config_path()
+if _BOOTSTRAP_CONFIG_PATH is not None:
+    os.environ.setdefault("HY3D_CONFIG_PATH", str(_BOOTSTRAP_CONFIG_PATH))
+    _BOOTSTRAP_CONFIG = _read_bootstrap_config(_BOOTSTRAP_CONFIG_PATH)
+    _BOOTSTRAP_PROJECT = _BOOTSTRAP_CONFIG.get("HY3D_PROJECT_ROOT") or _BOOTSTRAP_CONFIG.get("project_root")
+    if _BOOTSTRAP_PROJECT:
+        _BOOTSTRAP_ROOTS.append(_resolve_bootstrap_path(_BOOTSTRAP_PROJECT, _BOOTSTRAP_CONFIG_PATH.parent).parent)
+if os.environ.get("HY3D_PROJECT_ROOT"):
+    _BOOTSTRAP_ROOTS.append(Path(os.environ["HY3D_PROJECT_ROOT"]).expanduser().parent)
+for root in _BOOTSTRAP_ROOTS:
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+
+from hy3d_v2.hy3d_core.config.paths import (  # noqa: E402
+    get_engine_root,
+    get_config_path,
+    get_exports_root,
+    get_project_root,
+    get_repo_root,
+    get_wrapper_run,
+    load_local_config,
+)
+
+REPO_ROOT = get_repo_root()
+LOCAL_CONFIG_PATH = get_config_path(REPO_ROOT)
+PROJECT_ROOT = get_project_root()
 CORE_ROOT = PROJECT_ROOT / "hy3d_core"
 LOCAL_CONNECTOR_ROOT = MODULE_ROOT
-ENGINE_ROOT = _configured_path("HY3D_ENGINE_ROOT", "engine_root", REPO_ROOT.parent / "3D_ENGINES" / "triposr-local")
-WRAPPER_RUN = _configured_path("HY3D_WRAPPER_RUN", "wrapper_run", ENGINE_ROOT.parent / "wrappers" / "run_triposr_local.ps1")
+ENGINE_ROOT = get_engine_root()
+WRAPPER_RUN = get_wrapper_run()
 ENGINE_VENV = ENGINE_ROOT / ".venv"
 ENGINE_REPO = ENGINE_ROOT / "TripoSR"
-EXPORTS_ROOT = _configured_path("HY3D_EXPORTS_ROOT", "exports_root", REPO_ROOT / "HY3D_EXPORTS")
+EXPORTS_ROOT = get_exports_root()
 SAMPLE_INPUT = PROJECT_ROOT / "test_assets" / "real_smoke_input.png"
 VALID_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".avif"}
 ADDON_BUILD_ID = f"hy3d_local_connector_{datetime.now().strftime('%Y%m%d_%H%M')}"
@@ -86,7 +129,7 @@ bl_info = {
 
 try:  # pragma: no cover - Blender-only import
     import bpy
-    from bpy.props import BoolProperty, IntProperty, PointerProperty, StringProperty
+    from bpy.props import BoolProperty, EnumProperty, IntProperty, PointerProperty, StringProperty
     from bpy.types import Operator, Panel, PropertyGroup
     from bpy_extras.io_utils import ImportHelper
 
@@ -114,6 +157,9 @@ except Exception:  # pragma: no cover - importable outside Blender for tests
         return None
 
     def BoolProperty(**_kwargs):  # type: ignore[misc]
+        return None
+
+    def EnumProperty(**_kwargs):  # type: ignore[misc]
         return None
 
     def PointerProperty(**_kwargs):  # type: ignore[misc]
@@ -273,11 +319,24 @@ def _validate_stl_ready(props) -> bool:
 def _local_engine_status() -> dict[str, object]:
     python_exe = ENGINE_VENV / "Scripts" / "python.exe"
     run_py = ENGINE_REPO / "run.py"
+    missing = []
+    if not WRAPPER_RUN.exists():
+        missing.append("wrapper_run")
+    if not ENGINE_ROOT.exists():
+        missing.append("engine_root")
+    if not ENGINE_VENV.exists():
+        missing.append("engine_venv")
+    if not python_exe.exists():
+        missing.append("engine_python")
+    if not run_py.exists():
+        missing.append("triposr_run_py")
     return {
         "build_id": ADDON_BUILD_ID,
         "addon_path": str(LOCAL_CONNECTOR_ROOT),
+        "repo_root": str(REPO_ROOT),
         "config_path": str(LOCAL_CONFIG_PATH),
         "config_exists": LOCAL_CONFIG_PATH.exists(),
+        "config_keys": sorted(load_local_config().keys()),
         "project_root": str(PROJECT_ROOT),
         "workspace": str(workspace_root()),
         "engine_root": str(ENGINE_ROOT),
@@ -289,6 +348,8 @@ def _local_engine_status() -> dict[str, object]:
         "triposr_repo_exists": ENGINE_REPO.exists(),
         "run_py_exists": run_py.exists(),
         "sample_input_exists": SAMPLE_INPUT.exists(),
+        "missing": missing,
+        "recommendation": "Import Existing Result Package works without TripoSR. Configure HY3D_ENGINE_ROOT and HY3D_WRAPPER_RUN before Run Local TripoSR." if missing else "Local TripoSR engine is ready.",
     }
 
 
@@ -462,6 +523,9 @@ def _reset_session(props) -> None:
     props.self_check_status = ""
     props.last_status = STATUS_NO_JOB
     props.last_error = ""
+    props.remote_job_id = ""
+    props.remote_status = ""
+    props.remote_last_error = ""
 
 
 def _find_imported_object(job_id: str, role: str):
@@ -576,9 +640,102 @@ def _path_openable(path: Path | None) -> bool:
     return path is not None and path.exists()
 
 
+def _is_remote_mode(props) -> bool:
+    return getattr(props, "execution_mode", "local") == "remote"
+
+
+def _remote_base_url(props) -> str:
+    url = str(getattr(props, "remote_server_url", "") or "").strip().rstrip("/")
+    if not url:
+        raise HY3DError("Remote Server URL is required.")
+    return url
+
+
+def _remote_request(
+    props,
+    method: str,
+    path: str,
+    *,
+    body: bytes | None = None,
+    headers: dict[str, str] | None = None,
+    timeout: int = 120,
+) -> tuple[int, bytes, dict[str, str]]:
+    url = f"{_remote_base_url(props)}{path}"
+    request = urlrequest.Request(url, data=body, method=method, headers=headers or {})
+    try:
+        with urlrequest.urlopen(request, timeout=timeout) as response:
+            return int(response.status), response.read(), dict(response.headers)
+    except urlerror.HTTPError as exc:
+        payload = exc.read()
+        message = payload.decode("utf-8", errors="replace") or str(exc)
+        raise HY3DError(f"Remote API error {exc.code}: {message}") from exc
+    except urlerror.URLError as exc:
+        raise HY3DError(f"Remote API connection failed: {exc}") from exc
+
+
+def _remote_json(props, method: str, path: str, *, body: bytes | None = None, headers: dict[str, str] | None = None, timeout: int = 120) -> dict:
+    _status, payload, _headers = _remote_request(props, method, path, body=body, headers=headers, timeout=timeout)
+    try:
+        return json.loads(payload.decode("utf-8"))
+    except Exception as exc:
+        raise HY3DError(f"Remote API returned invalid JSON: {exc}") from exc
+
+
+def _multipart_form(fields: dict[str, str], files: dict[str, Path]) -> tuple[bytes, str]:
+    boundary = f"----hy3d{uuid.uuid4().hex}"
+    chunks: list[bytes] = []
+    for name, value in fields.items():
+        chunks.append(f"--{boundary}\r\n".encode("ascii"))
+        chunks.append(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("ascii"))
+        chunks.append(str(value).encode("utf-8"))
+        chunks.append(b"\r\n")
+    for name, path in files.items():
+        chunks.append(f"--{boundary}\r\n".encode("ascii"))
+        chunks.append(f'Content-Disposition: form-data; name="{name}"; filename="{path.name}"\r\n'.encode("ascii"))
+        content_type = "model/gltf-binary" if path.suffix.lower() == ".glb" else "application/octet-stream"
+        if path.suffix.lower() in VALID_IMAGE_SUFFIXES:
+            content_type = f"image/{'jpeg' if path.suffix.lower() in {'.jpg', '.jpeg'} else path.suffix.lower().lstrip('.')}"
+        chunks.append(f"Content-Type: {content_type}\r\n\r\n".encode("ascii"))
+        chunks.append(path.read_bytes())
+        chunks.append(b"\r\n")
+    chunks.append(f"--{boundary}--\r\n".encode("ascii"))
+    return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
+
+
+def _remote_download(props, path: str, destination: Path) -> Path:
+    _status, payload, _headers = _remote_request(props, "GET", path, timeout=300)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(payload)
+    return destination
+
+
+def _remote_job_download_dir(props) -> Path:
+    remote_job_id = str(getattr(props, "remote_job_id", "") or "").strip() or "remote_job"
+    target = workspace_root() / "remote_downloads" / remote_job_id
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def _set_remote_error(props, message: str) -> None:
+    props.remote_last_error = message
+    props.last_error = message
+
+
 if BLENDER_AVAILABLE:  # pragma: no branch
     class HY3DLocalConnectorProperties(PropertyGroup):
+        execution_mode: EnumProperty(
+            name="Execution Mode",
+            items=[
+                ("local", "Local", ""),
+                ("remote", "Remote", ""),
+            ],
+            default="local",
+        )
         primary_image_path: StringProperty(name="Primary Image Path", default="")
+        remote_server_url: StringProperty(name="Remote Server URL", default="http://127.0.0.1:8000")
+        remote_job_id: StringProperty(name="Remote Job ID", default="")
+        remote_status: StringProperty(name="Remote Status", default="")
+        remote_last_error: StringProperty(name="Last Remote Error", default="")
         engine_job_id: StringProperty(name="Engine Job ID", default="")
         job_id: StringProperty(name="Job ID", default="")
         version_id: StringProperty(name="Version ID", default="v1")
@@ -714,6 +871,10 @@ if BLENDER_AVAILABLE:  # pragma: no branch
 
         def execute(self, context):
             props = context.scene.hy3d_local_connector
+            if _is_remote_mode(props):
+                props.last_error = "Run Local TripoSR is disabled in remote mode. Use Submit Image To Server."
+                self.report({"ERROR"}, props.last_error)
+                return {"CANCELLED"}
             status = _local_engine_status()
             if not all(
                 [
@@ -929,6 +1090,267 @@ if BLENDER_AVAILABLE:  # pragma: no branch
                 self.report({"ERROR"}, f"Failed to import MeshLab candidate GLB: {exc}")
                 return {"CANCELLED"}
             self.report({"INFO"}, "MeshLab candidate GLB imported.")
+            return {"FINISHED"}
+
+
+    class HY3D_LOCAL_CONNECTOR_OT_CheckRemoteServer(Operator):
+        bl_idname = "hy3d_local_connector.check_remote_server"
+        bl_label = "Check Remote Server"
+
+        def execute(self, context):
+            props = context.scene.hy3d_local_connector
+            try:
+                payload = _remote_json(props, "GET", "/health", timeout=15)
+            except Exception as exc:
+                _set_remote_error(props, str(exc))
+                self.report({"ERROR"}, props.remote_last_error)
+                return {"CANCELLED"}
+            props.remote_status = str(payload.get("status", "unknown"))
+            props.remote_last_error = ""
+            self.report({"INFO"}, f"Remote server: {payload.get('service', 'unknown')}")
+            return {"FINISHED"}
+
+
+    class HY3D_LOCAL_CONNECTOR_OT_SubmitImageToServer(Operator):
+        bl_idname = "hy3d_local_connector.submit_image_to_server"
+        bl_label = "Submit Image To Server"
+
+        def execute(self, context):
+            props = context.scene.hy3d_local_connector
+            if not _is_remote_mode(props):
+                self.report({"ERROR"}, "Switch Execution Mode to Remote before submitting to server.")
+                return {"CANCELLED"}
+            primary_image, error = _validate_primary_image(props.primary_image_path)
+            if primary_image is None:
+                self.report({"ERROR"}, error or "Primary image is invalid.")
+                return {"CANCELLED"}
+            body, content_type = _multipart_form({"repair_profile": props.repair_profile or "safe_light"}, {"image": primary_image})
+            try:
+                payload = _remote_json(props, "POST", "/api/jobs", body=body, headers={"Content-Type": content_type}, timeout=max(120, int(props.timeout_seconds)))
+            except Exception as exc:
+                _set_remote_error(props, str(exc))
+                self.report({"ERROR"}, props.remote_last_error)
+                return {"CANCELLED"}
+            props.remote_job_id = str(payload.get("job_id") or "")
+            props.remote_status = str(payload.get("status") or "")
+            props.job_id = props.remote_job_id
+            props.version_id = "v1"
+            props.remote_last_error = str(payload.get("error") or "")
+            if props.remote_last_error:
+                self.report({"ERROR"}, props.remote_last_error)
+                return {"CANCELLED"}
+            self.report({"INFO"}, f"Remote job submitted: {props.remote_job_id}")
+            return {"FINISHED"}
+
+
+    class HY3D_LOCAL_CONNECTOR_OT_RefreshRemoteJobStatus(Operator):
+        bl_idname = "hy3d_local_connector.refresh_remote_job_status"
+        bl_label = "Refresh Remote Job Status"
+
+        def execute(self, context):
+            props = context.scene.hy3d_local_connector
+            job_id = props.remote_job_id.strip()
+            if not job_id:
+                self.report({"ERROR"}, "Remote Job ID is required.")
+                return {"CANCELLED"}
+            try:
+                payload = _remote_json(props, "GET", f"/api/jobs/{job_id}/status", timeout=30)
+            except Exception as exc:
+                _set_remote_error(props, str(exc))
+                self.report({"ERROR"}, props.remote_last_error)
+                return {"CANCELLED"}
+            props.remote_status = str(payload.get("status") or "")
+            props.current_status = props.remote_status
+            props.remote_last_error = ""
+            self.report({"INFO"}, f"Remote status: {props.remote_status}")
+            return {"FINISHED"}
+
+
+    def _download_remote_candidate(context, props, candidate_type: str) -> Path:
+        job_id = props.remote_job_id.strip()
+        if not job_id:
+            raise HY3DError("Remote Job ID is required.")
+        filename = {
+            "original": "model.glb",
+            "light": "repaired_candidate_light.glb",
+            "meshfix": "repaired_candidate_meshfix.glb",
+            "meshlab": "repaired_candidate_meshlab.glb",
+        }[candidate_type]
+        target = _remote_job_download_dir(props) / filename
+        path = _remote_download(props, f"/api/jobs/{job_id}/candidates/{candidate_type}", target)
+        props.job_id = job_id
+        props.version_id = "v1"
+        if candidate_type == "original":
+            props.candidate_model_path = str(path)
+        elif candidate_type == "light":
+            props.repaired_candidate_path = str(path)
+            props.repaired_candidate_light_path = str(path)
+        elif candidate_type == "meshfix":
+            props.repaired_candidate_meshfix_path = str(path)
+        elif candidate_type == "meshlab":
+            props.repaired_candidate_meshlab_path = str(path)
+        _import_candidate_glb_for_review(context, props, path, candidate_type, f"Remote {candidate_type} candidate")
+        for obj in context.selected_objects:
+            obj["hy3d_remote_job_id"] = job_id
+            obj["hy3d_source"] = "remote"
+        return path
+
+
+    class HY3D_LOCAL_CONNECTOR_OT_DownloadRemoteOriginalCandidate(Operator):
+        bl_idname = "hy3d_local_connector.download_remote_original_candidate"
+        bl_label = "Download Original Candidate"
+
+        def execute(self, context):
+            try:
+                path = _download_remote_candidate(context, context.scene.hy3d_local_connector, "original")
+            except Exception as exc:
+                _set_remote_error(context.scene.hy3d_local_connector, str(exc))
+                self.report({"ERROR"}, context.scene.hy3d_local_connector.remote_last_error)
+                return {"CANCELLED"}
+            self.report({"INFO"}, f"Downloaded {path.name}")
+            return {"FINISHED"}
+
+
+    class HY3D_LOCAL_CONNECTOR_OT_DownloadRemoteLightCandidate(Operator):
+        bl_idname = "hy3d_local_connector.download_remote_light_candidate"
+        bl_label = "Download Light Candidate"
+
+        def execute(self, context):
+            try:
+                path = _download_remote_candidate(context, context.scene.hy3d_local_connector, "light")
+            except Exception as exc:
+                _set_remote_error(context.scene.hy3d_local_connector, str(exc))
+                self.report({"ERROR"}, context.scene.hy3d_local_connector.remote_last_error)
+                return {"CANCELLED"}
+            self.report({"INFO"}, f"Downloaded {path.name}")
+            return {"FINISHED"}
+
+
+    class HY3D_LOCAL_CONNECTOR_OT_DownloadRemoteMeshFixCandidate(Operator):
+        bl_idname = "hy3d_local_connector.download_remote_meshfix_candidate"
+        bl_label = "Download MeshFix Candidate"
+
+        def execute(self, context):
+            try:
+                path = _download_remote_candidate(context, context.scene.hy3d_local_connector, "meshfix")
+            except Exception as exc:
+                _set_remote_error(context.scene.hy3d_local_connector, str(exc))
+                self.report({"ERROR"}, context.scene.hy3d_local_connector.remote_last_error)
+                return {"CANCELLED"}
+            self.report({"INFO"}, f"Downloaded {path.name}")
+            return {"FINISHED"}
+
+
+    class HY3D_LOCAL_CONNECTOR_OT_DownloadRemoteMeshLabCandidate(Operator):
+        bl_idname = "hy3d_local_connector.download_remote_meshlab_candidate"
+        bl_label = "Download MeshLab Candidate"
+
+        def execute(self, context):
+            try:
+                path = _download_remote_candidate(context, context.scene.hy3d_local_connector, "meshlab")
+            except Exception as exc:
+                _set_remote_error(context.scene.hy3d_local_connector, str(exc))
+                self.report({"ERROR"}, context.scene.hy3d_local_connector.remote_last_error)
+                return {"CANCELLED"}
+            self.report({"INFO"}, f"Downloaded {path.name}")
+            return {"FINISHED"}
+
+
+    class HY3D_LOCAL_CONNECTOR_OT_UploadSelectedAsAcceptedRemote(Operator):
+        bl_idname = "hy3d_local_connector.upload_selected_as_accepted"
+        bl_label = "Upload Selected As Accepted"
+
+        def execute(self, context):
+            props = context.scene.hy3d_local_connector
+            job_id = props.remote_job_id.strip()
+            obj = context.active_object
+            if not job_id:
+                self.report({"ERROR"}, "Remote Job ID is required.")
+                return {"CANCELLED"}
+            if obj is None:
+                self.report({"ERROR"}, "Select an object to upload as accepted_model.glb.")
+                return {"CANCELLED"}
+            previous_selection = list(context.selected_objects)
+            previous_active = context.view_layer.objects.active
+            with tempfile.TemporaryDirectory(prefix="hy3d_remote_accept_") as temp_dir:
+                accepted_path = Path(temp_dir) / "accepted_model.glb"
+                bpy.ops.object.select_all(action="DESELECT")
+                obj.select_set(True)
+                context.view_layer.objects.active = obj
+                try:
+                    bpy.ops.export_scene.gltf(filepath=str(accepted_path), use_selection=True, export_format="GLB")
+                finally:
+                    bpy.ops.object.select_all(action="DESELECT")
+                    for previous in previous_selection:
+                        previous.select_set(True)
+                    context.view_layer.objects.active = previous_active
+                body, content_type = _multipart_form(
+                    {
+                        "source_candidate_type": str(obj.get("hy3d_candidate_type", "selected_object")),
+                        "notes": "Accepted manually in Blender remote mode.",
+                    },
+                    {"accepted_model": accepted_path},
+                )
+                try:
+                    payload = _remote_json(props, "POST", f"/api/jobs/{job_id}/accepted", body=body, headers={"Content-Type": content_type}, timeout=300)
+                except Exception as exc:
+                    _set_remote_error(props, str(exc))
+                    self.report({"ERROR"}, props.remote_last_error)
+                    return {"CANCELLED"}
+            obj["hy3d_remote_job_id"] = job_id
+            obj["hy3d_job_id"] = job_id
+            obj["hy3d_role"] = "accepted"
+            obj["hy3d_source"] = "remote"
+            props.remote_status = str(payload.get("status", "accepted"))
+            props.current_status = STATUS_ACCEPTED
+            props.remote_last_error = ""
+            self.report({"INFO"}, "Accepted model uploaded.")
+            return {"FINISHED"}
+
+
+    class HY3D_LOCAL_CONNECTOR_OT_RequestRemoteSTLExport(Operator):
+        bl_idname = "hy3d_local_connector.request_remote_stl_export"
+        bl_label = "Request Remote STL Export"
+
+        def execute(self, context):
+            props = context.scene.hy3d_local_connector
+            job_id = props.remote_job_id.strip()
+            if not job_id:
+                self.report({"ERROR"}, "Remote Job ID is required.")
+                return {"CANCELLED"}
+            try:
+                payload = _remote_json(props, "POST", f"/api/jobs/{job_id}/export-stl", timeout=300)
+            except Exception as exc:
+                _set_remote_error(props, str(exc))
+                self.report({"ERROR"}, props.remote_last_error)
+                return {"CANCELLED"}
+            props.remote_status = str(payload.get("status", "stl_exported"))
+            props.current_status = STATUS_STL_EXPORTED
+            props.remote_last_error = ""
+            self.report({"INFO"}, "Remote STL export requested.")
+            return {"FINISHED"}
+
+
+    class HY3D_LOCAL_CONNECTOR_OT_DownloadFinalPackage(Operator):
+        bl_idname = "hy3d_local_connector.download_final_package"
+        bl_label = "Download Final Package"
+
+        def execute(self, context):
+            props = context.scene.hy3d_local_connector
+            job_id = props.remote_job_id.strip()
+            if not job_id:
+                self.report({"ERROR"}, "Remote Job ID is required.")
+                return {"CANCELLED"}
+            target = _remote_job_download_dir(props) / "hy3d_final_package.zip"
+            try:
+                _remote_download(props, f"/api/jobs/{job_id}/final-package", target)
+            except Exception as exc:
+                _set_remote_error(props, str(exc))
+                self.report({"ERROR"}, props.remote_last_error)
+                return {"CANCELLED"}
+            props.exports_dir = str(target.parent)
+            props.remote_last_error = ""
+            self.report({"INFO"}, f"Downloaded {target.name}")
             return {"FINISHED"}
 
 
@@ -1193,6 +1615,7 @@ if BLENDER_AVAILABLE:  # pragma: no branch
 
             box = layout.box()
             box.label(text="Input")
+            box.prop(props, "execution_mode")
             box.prop(props, "primary_image_path", text="Primary Image")
             if props.input_quality_status:
                 box.label(text=f"Input Quality: {props.input_quality_status}")
@@ -1206,11 +1629,35 @@ if BLENDER_AVAILABLE:  # pragma: no branch
             box.label(text="Local TripoSR")
             box.prop(props, "timeout_seconds")
             box.operator("hy3d_local_connector.check_local_engine")
-            box.operator("hy3d_local_connector.run_local_triposr")
             row = box.row()
-            row.enabled = _validate_result_package_path(props.result_package_path)[0] is not None
+            row.enabled = props.execution_mode == "local"
+            row.operator("hy3d_local_connector.run_local_triposr")
+            row = box.row()
+            row.enabled = props.execution_mode == "local" and _validate_result_package_path(props.result_package_path)[0] is not None
             row.operator("hy3d_local_connector.import_local_result")
             box.operator("hy3d_local_connector.import_existing_result_package")
+
+            box = layout.box()
+            box.label(text="Remote Server")
+            box.prop(props, "remote_server_url", text="Server URL")
+            box.prop(props, "remote_job_id", text="Remote Job ID")
+            box.label(text=f"Remote Status: {props.remote_status or '(none)'}")
+            if props.remote_last_error:
+                box.label(text=f"Last Remote Error: {props.remote_last_error}")
+            box.operator("hy3d_local_connector.check_remote_server")
+            row = box.row()
+            row.enabled = props.execution_mode == "remote"
+            row.operator("hy3d_local_connector.submit_image_to_server")
+            row = box.row()
+            row.enabled = bool(props.remote_job_id.strip())
+            row.operator("hy3d_local_connector.refresh_remote_job_status")
+            box.operator("hy3d_local_connector.download_remote_original_candidate")
+            box.operator("hy3d_local_connector.download_remote_light_candidate")
+            box.operator("hy3d_local_connector.download_remote_meshfix_candidate")
+            box.operator("hy3d_local_connector.download_remote_meshlab_candidate")
+            box.operator("hy3d_local_connector.upload_selected_as_accepted")
+            box.operator("hy3d_local_connector.request_remote_stl_export")
+            box.operator("hy3d_local_connector.download_final_package")
 
             box = layout.box()
             box.label(text="Candidate")
@@ -1300,6 +1747,16 @@ if BLENDER_AVAILABLE:  # pragma: no branch
         HY3D_LOCAL_CONNECTOR_OT_ImportRepairedCandidateGLB,
         HY3D_LOCAL_CONNECTOR_OT_ImportMeshFixCandidateGLB,
         HY3D_LOCAL_CONNECTOR_OT_ImportMeshLabCandidateGLB,
+        HY3D_LOCAL_CONNECTOR_OT_CheckRemoteServer,
+        HY3D_LOCAL_CONNECTOR_OT_SubmitImageToServer,
+        HY3D_LOCAL_CONNECTOR_OT_RefreshRemoteJobStatus,
+        HY3D_LOCAL_CONNECTOR_OT_DownloadRemoteOriginalCandidate,
+        HY3D_LOCAL_CONNECTOR_OT_DownloadRemoteLightCandidate,
+        HY3D_LOCAL_CONNECTOR_OT_DownloadRemoteMeshFixCandidate,
+        HY3D_LOCAL_CONNECTOR_OT_DownloadRemoteMeshLabCandidate,
+        HY3D_LOCAL_CONNECTOR_OT_UploadSelectedAsAcceptedRemote,
+        HY3D_LOCAL_CONNECTOR_OT_RequestRemoteSTLExport,
+        HY3D_LOCAL_CONNECTOR_OT_DownloadFinalPackage,
         HY3D_LOCAL_CONNECTOR_OT_SaveBasicReview,
         HY3D_LOCAL_CONNECTOR_OT_AcceptSelectedObject,
         HY3D_LOCAL_CONNECTOR_OT_ExportSTLFromAccepted,
@@ -1369,11 +1826,16 @@ __all__ = [
     "_has_valid_repaired_candidate_path",
     "_import_result_package_into_session",
     "_import_result_package_from_path",
+    "_is_remote_mode",
     "_is_hy3d_scene_object",
     "_hy3d_job_dir_path",
     "_local_engine_status",
     "_local_engine_status_file_path",
     "_path_openable",
+    "_remote_base_url",
+    "_remote_download",
+    "_remote_json",
+    "_remote_request",
     "_reset_session",
     "_resolve_existing_dir",
     "_resolve_existing_file",

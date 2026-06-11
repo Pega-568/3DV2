@@ -6,8 +6,17 @@ __pycache__/
 logs/
 
 hy3d_local_config.json
+.env
+.env.local
+.env.*
+!.env.server.example
+!.env.docker.example
 
 HY3D_EXPORTS/
+server_workspace/
+server_exports/
+model_cache/
+docker_data/
 dist/
 *.zip
 !hy3d_v2/test_assets/result_package_sample.zip

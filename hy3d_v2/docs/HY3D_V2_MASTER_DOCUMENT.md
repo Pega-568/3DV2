@@ -1,4 +1,4 @@
-# HY3D v2 Master Document
+﻿# HY3D v2 Master Document
 
 ## Resumen del proyecto
 HY3D v2 es un sistema local para Blender orientado a un flujo GLB-first. La generación 3D pesada queda fuera de la PC local. El sistema local crea jobs, empaqueta entradas, importa resultados externos, valida candidatos, permite revisión/edición humana, promueve un GLB aceptado y exporta STL solo desde la versión aceptada activa.
@@ -62,6 +62,136 @@ Entregar un flujo estable y verificable:
 - `save_manual_review()`
 - `promote_selected_object_to_accepted()`
 - `export_stl_from_accepted()`
+
+## Modo remoto por IP
+HY3D v2 ahora soporta dos modos de ejecución en el add-on HY3D Local Connector:
+
+- `local`: Blender ejecuta el wrapper local TripoSR, importa `result_package.zip`, revisa candidatos y exporta STL desde el aceptado. Este flujo se mantiene intacto.
+- `remote`: Blender actúa como cliente HTTP. El servidor recibe la imagen, ejecuta TripoSR/HY3D core, guarda candidatos/reportes, y espera que Blender suba el objeto aceptado manualmente.
+
+En modo remoto corren en el servidor:
+
+1. API FastAPI `server.hy3d_api.main:app`.
+2. Workspace remoto del job.
+3. Wrapper TripoSR portable, si `HY3D_ENGINE_ROOT` y `HY3D_WRAPPER_RUN` están configurados.
+4. `hy3d_v2.hy3d_core.import_result_package()`.
+5. Reparaciones y reportes de calidad.
+6. Exportación STL desde `accepted_model.glb`.
+
+Blender sigue haciendo:
+
+1. Selección de imagen inicial.
+2. Descarga e importación de candidatos para revisión visual.
+3. Decisión humana de aceptación.
+4. Export temporal del objeto seleccionado como GLB.
+5. Subida de ese GLB al servidor como `accepted_model.glb`.
+6. Descarga del paquete final.
+
+Para iniciar el backend:
+
+```powershell
+uvicorn server.hy3d_api.main:app --host 0.0.0.0 --port 8000
+```
+
+Variables de entorno del servidor:
+
+```text
+HY3D_SERVER_WORKSPACE_ROOT
+HY3D_SERVER_EXPORTS_ROOT
+HY3D_ENGINE_ROOT
+HY3D_WRAPPER_RUN
+HY3D_JOB_TIMEOUT_SECONDS
+HY3D_MAX_UPLOAD_MB
+```
+
+El add-on se configura en `Execution Mode = Remote`, sección `Remote Server`, con `Server URL` como `http://127.0.0.1:8000` o la IP LAN del servidor. El flujo remoto recomendado es:
+
+1. `Check Remote Server`.
+2. `Submit Image To Server`.
+3. `Refresh Remote Job Status` hasta `candidate_ready_for_review`.
+4. Descargar candidatos con `Download Original Candidate`, `Download Light Candidate`, `Download MeshFix Candidate` o `Download MeshLab Candidate`.
+5. Revisar manualmente en Blender.
+6. Seleccionar el objeto aceptado.
+7. `Upload Selected As Accepted`.
+8. `Request Remote STL Export`.
+9. `Download Final Package`.
+
+Reglas del modo remoto:
+
+- `model.glb` es solo candidato original.
+- `repaired_candidate_*.glb` son solo candidatos reparados.
+- Ningún candidato se acepta automáticamente.
+- Solo el objeto seleccionado manualmente en Blender se sube como `accepted_model.glb`.
+- El servidor solo exporta `accepted_model.stl` desde `accepted_model.glb`.
+- Las respuestas públicas no necesitan exponer rutas absolutas internas del servidor.
+
+## Ejecución con Docker
+La primera imagen Docker empaqueta solo el backend FastAPI. No incluye Blender, no descarga pesos pesados y no intenta instalar TripoSR completo durante el build.
+
+Requisitos:
+
+- Docker.
+- Docker Compose.
+
+Preparar entorno:
+
+```bash
+cp .env.docker.example .env
+```
+
+Construir:
+
+```bash
+docker compose build
+```
+
+Levantar:
+
+```bash
+docker compose up -d
+```
+
+Ver logs:
+
+```bash
+docker compose logs -f hy3d-api
+```
+
+Probar health:
+
+```bash
+curl http://localhost:8000/health
+```
+
+Modo fixture/dev:
+
+```env
+HY3D_SERVER_FIXTURE_RESULT_PACKAGE=hy3d_v2/test_assets/result_package_sample.zip
+```
+
+Con esa variable, `POST /api/jobs` puede validar el flujo remoto mínimo sin TripoSR real: crea job, importa el fixture como `model.glb`, genera reportes, permite subir `accepted_model.glb`, exporta STL desde el aceptado y descarga el paquete final.
+
+Exponer por IP:
+
+```text
+http://<IP_SERVIDOR>:8000
+```
+
+Configurar Blender:
+
+1. `Execution Mode = Remote`.
+2. `Server URL = http://<IP_SERVIDOR>:8000`.
+3. `Check Remote Server`.
+4. Continuar con `Submit Image To Server`, descarga de candidatos, aceptación manual y paquete final.
+
+Preparación para TripoSR real en servidor:
+
+- Opción A: montar un TripoSR externo, por ejemplo `/opt/triposr-local:/opt/triposr-local:ro`.
+- Definir `HY3D_ENGINE_ROOT=/opt/triposr-local`.
+- Definir `HY3D_WRAPPER_RUN=/app/tools/triposr/run_triposr_local.ps1` o el wrapper Linux equivalente de una fase posterior.
+- Opción B: crear una imagen worker futura separada.
+
+Limitación actual: Docker valida la API y el modo fixture/dev. La integración completa de TripoSR real dentro de contenedor o mediante worker queda para la siguiente fase.
 
 ## Estructura del proyecto
 ```text
@@ -444,22 +574,22 @@ Razón de la prueba:
 - La meta fue validar la base runtime de CPU, no declarar que TripoSR local CPU ya sea práctico o rápido en esta máquina.
 
 Entorno aislado:
-- raíz: `E:\3D_ENGINES\triposr-local`
-- venv: `E:\3D_ENGINES\triposr-local\.venv`
-- wrapper: `E:\3D_ENGINES\wrappers\setup_pytorch_cpu_probe.ps1`
-- probe runtime: `E:\3D_ENGINES\triposr-local\pytorch_probe.py`
-- reporte: `E:\3D_ENGINES\triposr-local\pytorch_probe_report.json`
+- raíz: `<external_engines_root>\\triposr-local`
+- venv: `<external_engines_root>\\triposr-local\.venv`
+- wrapper: `<repo>\\tools\\triposr\setup_pytorch_cpu_probe.ps1`
+- probe runtime: `<external_engines_root>\\triposr-local\pytorch_probe.py`
+- reporte: `<external_engines_root>\\triposr-local\pytorch_probe_report.json`
 
 Variables configuradas en el wrapper:
-- `HF_HOME=E:\3D_ENGINES\cache\huggingface`
-- `TRANSFORMERS_CACHE=E:\3D_ENGINES\cache\huggingface`
-- `TORCH_HOME=E:\3D_ENGINES\cache\torch`
-- `TMP=E:\3D_ENGINES\tmp`
-- `TEMP=E:\3D_ENGINES\tmp`
+- `HF_HOME=<external_engines_root>\cache\huggingface`
+- `TRANSFORMERS_CACHE=<external_engines_root>\cache\huggingface`
+- `TORCH_HOME=<external_engines_root>\cache\torch`
+- `TMP=<external_engines_root>\tmp`
+- `TEMP=<external_engines_root>\tmp`
 
 Comandos usados:
 1. ejecución del wrapper:
-   - `powershell -File E:\3D_ENGINES\wrappers\setup_pytorch_cpu_probe.ps1`
+   - `powershell -File <repo>\\tools\\triposr\setup_pytorch_cpu_probe.ps1`
 2. instalación de PyTorch CPU dentro del venv aislado:
    - `python -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu`
 
@@ -482,27 +612,27 @@ Razón del cambio temporal de enfoque:
 - La meta era estricta: generar un `.glb` real o detener la integración local si CPU-only no era práctico.
 
 Entorno local usado:
-- raíz del motor: `E:\3D_ENGINES\triposr-local`
-- repositorio: `E:\3D_ENGINES\triposr-local\TripoSR`
-- venv: `E:\3D_ENGINES\triposr-local\.venv`
-- outputs: `E:\3D_ENGINES\triposr-local\outputs`
-- wrapper setup: `E:\3D_ENGINES\wrappers\setup_triposr_local.ps1`
-- wrapper smoke: `E:\3D_ENGINES\wrappers\test_triposr_local.ps1`
-- primer input inválido: `E:\3DV4\hy3d_v2\test_assets\sample_input.png`
-- input real del smoke válido: `E:\3DV4\hy3d_v2\test_assets\real_smoke_input.png`
+- raíz del motor: `<external_engines_root>\\triposr-local`
+- repositorio: `<external_engines_root>\\triposr-local\TripoSR`
+- venv: `<external_engines_root>\\triposr-local\.venv`
+- outputs: `<external_engines_root>\\triposr-local\outputs`
+- wrapper setup: `<repo>\\tools\\triposr\setup_triposr_local.ps1`
+- wrapper smoke: `<repo>\\tools\\triposr\test_triposr_local.ps1`
+- primer input inválido: `<repo>\hy3d_v2\test_assets\sample_input.png`
+- input real del smoke válido: `<repo>\hy3d_v2\test_assets\real_smoke_input.png`
 
 Comandos usados:
 1. setup aislado de TripoSR:
-   - `powershell -File E:\3D_ENGINES\wrappers\setup_triposr_local.ps1`
+   - `powershell -File <repo>\\tools\\triposr\setup_triposr_local.ps1`
 2. smoke local CPU:
-   - `powershell -File E:\3D_ENGINES\wrappers\test_triposr_local.ps1`
+   - `powershell -File <repo>\\tools\\triposr\test_triposr_local.ps1`
 3. comando objetivo del smoke válido:
-   - `python run.py E:\3DV4\hy3d_v2\test_assets\real_smoke_input.png --output-dir E:\3D_ENGINES\triposr-local\outputs\smoke --device cpu --model-save-format glb`
+   - `python run.py <repo>\hy3d_v2\test_assets\real_smoke_input.png --output-dir <external_engines_root>\\triposr-local\outputs\smoke --device cpu --model-save-format glb`
 4. fallback del smoke válido:
-   - `python run.py E:\3DV4\hy3d_v2\test_assets\real_smoke_input.png --output-dir E:\3D_ENGINES\triposr-local\outputs\smoke --device cpu`
+   - `python run.py <repo>\hy3d_v2\test_assets\real_smoke_input.png --output-dir <external_engines_root>\\triposr-local\outputs\smoke --device cpu`
 
 Resultado del setup:
-- `E:\3D_ENGINES\triposr-local\install_report.json` quedó con `success = true`.
+- `<external_engines_root>\\triposr-local\install_report.json` quedó con `success = true`.
 - `python_version = 3.11.9`
 - `torch_version = 2.12.0+cpu`
 - `cuda_available = false`
@@ -514,28 +644,28 @@ Resultado del setup:
   - `rembg==2.0.69`
   - `onnxruntime`
   - `gradio==4.8.0`
-- El repo `TripoSR` quedó instalado en `E:\3D_ENGINES\triposr-local\TripoSR` sin tocar `E:\3DV4\hy3d_v2`.
+- El repo `TripoSR` quedó instalado en `<external_engines_root>\\triposr-local\TripoSR` sin tocar `<repo>\hy3d_v2`.
 
 Resultado del smoke:
-- `E:\3D_ENGINES\triposr-local\smoke_report.json` quedó con:
+- `<external_engines_root>\\triposr-local\smoke_report.json` quedó con:
   - `success = true`
   - `status = success`
   - `image_width = 512`
   - `image_height = 512`
   - `image_mode = RGB`
-  - `output_glb = E:\3D_ENGINES\triposr-local\outputs\smoke\0\mesh.glb`
+  - `output_glb = <external_engines_root>\\triposr-local\outputs\smoke\0\mesh.glb`
   - `output_obj = null`
   - `output_ply = null`
   - `duration_seconds = 329.007`
   - `local_cpu_practical = true`
 - El primer smoke sí alcanzó `run.py`, descargó el checkpoint completo (`model.ckpt` de ~1.68 GB), inicializó el modelo y luego falló en `Processing images`.
 - La causa real del primer fallo no fue el runtime base ni `torch`; fue el asset de entrada solicitado:
-  - `E:\3DV4\hy3d_v2\test_assets\sample_input.png`
+  - `<repo>\hy3d_v2\test_assets\sample_input.png`
   - tamaño real detectado: `RGB (1, 1)`
   - error real: `ValueError: tile cannot extend outside image`
 - Luego se creó una imagen real válida para repetir la prueba:
-  - origen: `C:\Users\Jona_\Downloads\C5.jpg`
-  - copia operativa: `E:\3DV4\hy3d_v2\test_assets\real_smoke_input.png`
+  - origen: `<user_downloads>\C5.jpg`
+  - copia operativa: `<repo>\hy3d_v2\test_assets\real_smoke_input.png`
   - dimensiones finales: `512x512`
   - modo: `RGB`
 - Con esa imagen válida, TripoSR local CPU sí completó el pipeline de punta a punta y exportó `mesh.glb`.
@@ -563,7 +693,7 @@ Objetivo de esta fase:
 - Convertir una imagen local válida en un `result_package.zip` compatible con el importador real de HY3D, sin tocar el core, sin Colab, sin Cloud Worker y sin crear todavía `HY3D Local Connector`.
 
 Archivo creado:
-- `E:\3D_ENGINES\wrappers\run_triposr_local.ps1`
+- `<repo>\\tools\\triposr\run_triposr_local.ps1`
 
 Contrato de entrada:
 - parámetros soportados:
@@ -577,7 +707,7 @@ Contrato de entrada:
   - dimensiones mínimas `128x128`
 
 Comando de prueba real ejecutado:
-- `powershell -ExecutionPolicy Bypass -File E:\3D_ENGINES\wrappers\run_triposr_local.ps1 -input_image "E:\3DV4\hy3d_v2\test_assets\real_smoke_input.png" -output_dir "E:\3D_ENGINES\triposr-local\outputs\job_test" -job_id "job_test" -version_id "v1"`
+- `powershell -ExecutionPolicy Bypass -File <repo>\\tools\\triposr\run_triposr_local.ps1 -input_image "<repo>\hy3d_v2\test_assets\real_smoke_input.png" -output_dir "<external_engines_root>\\triposr-local\outputs\job_test" -job_id "job_test" -version_id "v1"`
 
 Resultado del wrapper:
 - `run_report.json` quedó con:
@@ -585,10 +715,10 @@ Resultado del wrapper:
   - `status = completed`
   - `duration_seconds = 73.04`
   - `local_cpu_practical = true`
-  - `output_glb = E:\3D_ENGINES\triposr-local\outputs\job_test\engine_raw\0\mesh.glb`
-  - `result_package = E:\3D_ENGINES\triposr-local\outputs\job_test\result_package.zip`
+  - `output_glb = <external_engines_root>\\triposr-local\outputs\job_test\engine_raw\0\mesh.glb`
+  - `result_package = <external_engines_root>\\triposr-local\outputs\job_test\result_package.zip`
 - `result_package.zip` sí existe en:
-  - `E:\3D_ENGINES\triposr-local\outputs\job_test\result_package.zip`
+  - `<external_engines_root>\\triposr-local\outputs\job_test\result_package.zip`
 
 Contenido real del paquete:
 - `result_manifest.json`
@@ -607,11 +737,11 @@ Prueba real de importación en HY3D v2 Clean:
 - Se validó con el helper real del add-on limpio:
   - `_import_result_package_into_session()`
 - Workspace fallback usado:
-  - `E:\3DV4\hy3d_v2_clean_workspace`
+  - `<repo>\hy3d_v2_clean_workspace`
 - Job de prueba creado para importar:
   - `job_4c6e20a9043d`
 - Candidate importado correctamente en:
-  - `E:\3DV4\hy3d_v2_clean_workspace\jobs\job_4c6e20a9043d\versions\v1\engine_output\model.glb`
+  - `<repo>\hy3d_v2_clean_workspace\jobs\job_4c6e20a9043d\versions\v1\engine_output\model.glb`
 - Conclusión:
   - el `result_package.zip` generado por `run_triposr_local.ps1` sí es importable por HY3D v2 Clean.
 
@@ -690,13 +820,13 @@ Resultado actual de pruebas automatizadas:
 - `pytest -q hy3d_v2/tests` -> `47 passed in 5.39s`
 
 Prueba aislada adicional fuera del repo HY3D:
-- Wrapper ejecutado: `E:\3D_ENGINES\wrappers\setup_pytorch_cpu_probe.ps1`
-- Reporte generado: `E:\3D_ENGINES\triposr-local\pytorch_probe_report.json`
+- Wrapper ejecutado: `<repo>\\tools\\triposr\setup_pytorch_cpu_probe.ps1`
+- Reporte generado: `<external_engines_root>\\triposr-local\pytorch_probe_report.json`
 - Resultado:
   - `cuda_available = false`
   - `tensor_test_ok = true`
   - `tensor_test_seconds = 0.002697`
-- Esta prueba no instaló TripoSR y no tocó `E:\3DV4\hy3d_v2`.
+- Esta prueba no instaló TripoSR y no tocó `<repo>\hy3d_v2`.
 
 Assets de prueba reales creados:
 - `test_assets/sample_input.png`
@@ -715,8 +845,8 @@ Smoke real ejecutado en Blender 4.2:
 
 Evidencia del smoke:
 - `SMOKE_JOB_ID= job_eddd878afc22`
-- `SMOKE_ACCEPTED_GLB= C:\Users\Jona_\AppData\Roaming\Blender Foundation\Blender\4.2\datafiles\hy3d_v2_workspace\jobs\job_eddd878afc22\versions\v1\accepted\accepted_model.glb`
-- `SMOKE_ACCEPTED_STL= C:\Users\Jona_\AppData\Roaming\Blender Foundation\Blender\4.2\datafiles\hy3d_v2_workspace\jobs\job_eddd878afc22\versions\v1\accepted\accepted_model.stl`
+- `SMOKE_ACCEPTED_GLB= <blender_user_data>\4.2\datafiles\hy3d_v2_workspace\jobs\job_eddd878afc22\versions\v1\accepted\accepted_model.glb`
+- `SMOKE_ACCEPTED_STL= <blender_user_data>\4.2\datafiles\hy3d_v2_workspace\jobs\job_eddd878afc22\versions\v1\accepted\accepted_model.stl`
 
 Smoke reforzado con `edited_model.glb`:
 1. crear job
@@ -735,10 +865,10 @@ Estado honesto del smoke reforzado:
 ## Errores encontrados
 - `pytest` no encontraba el paquete `hy3d_v2` durante la primera recolección. Se corrigió agregando `tests/conftest.py`.
 - La validación opcional depende del stack local. Si `trimesh` o `pyvista` no están listos, el sistema degrada honestamente en lugar de declarar éxito falso.
-- El primer ZIP `E:\3DV4\hy3d_v2_addon.zip` no era aceptado por Blender como módulo válido en instalación manual. La evidencia del usuario fue `Modules Installed ()`.
+- El primer ZIP `<repo>\hy3d_v2_addon.zip` no era aceptado por Blender como módulo válido en instalación manual. La evidencia del usuario fue `Modules Installed ()`.
 - Causa corregida: el entrypoint raíz no exponía `bl_info` de forma explícita y el empaquetado no estaba controlado por un script reproducible mínimo.
 - Corrección aplicada: `hy3d_v2/__init__.py` ahora declara `bl_info` directamente y delega `register`/`unregister` a `blender_addon`; además se creó `scripts/package_blender_addon.py` para producir un ZIP limpio con solo el contenido runtime del add-on.
-- Verificación realizada: Blender 4.2 en modo background instaló `E:\3DV4\dist\hy3d_v2_addon.zip` y reportó `HY3D_MATCHES= [('hy3d_v2', 'HY3D v2')]`.
+- Verificación realizada: Blender 4.2 en modo background instaló `<repo>\dist\hy3d_v2_addon.zip` y reportó `HY3D_MATCHES= [('hy3d_v2', 'HY3D v2')]`.
 - El siguiente fallo real ya no era de empaquetado sino de rutas vacías en la UI. La evidencia fue `[Errno 13] Permission denied: '.'`, `RuntimeError: Error: Please select a file` y `accepted_model_path = ""`.
 - Causa corregida: el add-on convertía cadenas vacías en `Path('.')` y permitía ejecutar operadores con rutas inválidas para candidato, accepted y result package.
 - Corrección aplicada: el add-on ahora usa helpers centrales `_resolve_existing_file(...)` y `_resolve_existing_dir(...)` para impedir que rutas vacías o inválidas se conviertan en `"."`; además se bloquean operadores y acciones de UI cuando no existe una ruta válida.
@@ -759,32 +889,32 @@ Estado honesto del smoke reforzado:
 - Corrección aplicada: el add-on ahora implementa `Send Job to Cloud`, `Check Cloud Results`, `Import Cloud Result` y `Open Cloud Folder`, con `cloud_status.json` local y detección segura de `incoming/completed/failed`.
 - Límite actual: la integración quedó probada por tests de filesystem y contrato, pero no fue ejecutada de punta a punta en Blender 5.1 + Google Drive + Colab durante esta sesión.
 - Persistía un fallo reportado en Blender 5.1 durante `Create Job Package`: `RuntimeError: Error: Please select a file` y `[Errno 13] Permission denied: '.'`.
-- Auditoría realizada sobre el add-on instalado real en `C:\Users\Jona_\AppData\Roaming\Blender Foundation\Blender\5.1\scripts\addons\hy3d_v2\blender_addon\__init__.py`: la línea 191 actual ya no corresponde a `bpy.ops.import_scene.gltf(...)`; hoy contiene el loop de validación de `additional_view_path`. Esto indica que el traceback previo no describe la build actualmente instalada.
+- Auditoría realizada sobre el add-on instalado real en `<blender_user_data>\5.1\scripts\addons\hy3d_v2\blender_addon\__init__.py`: la línea 191 actual ya no corresponde a `bpy.ops.import_scene.gltf(...)`; hoy contiene el loop de validación de `additional_view_path`. Esto indica que el traceback previo no describe la build actualmente instalada.
 - Corrección aplicada: se agregó `ADDON_BUILD_ID = hy3d_v2_20260520_1155_routesafe`, visible en UI y en consola al registrar el add-on.
 - Corrección aplicada: se agregó `HY3D Self Check` para imprimir ruta real del add-on cargado, build, workspace, `primary_image_path`, `job_id`, `job_package_path`, `result_package_path`, `candidate_model_path` y `accepted_model_path`.
 - Corrección aplicada: `Create Job Package` ahora valida de forma estricta `primary_image_path` antes de llamar al core y rechaza `""`, `"."`, rutas inexistentes, directorios y extensiones no permitidas con mensajes explícitos.
 - Corrección aplicada: se agregó `Reset HY3D Session` para limpiar solo el estado de UI sin borrar archivos del job.
-- Corrección aplicada: se agregó `Use Sample Input`, apuntando primero a `E:\3DV4\hy3d_v2\test_assets\sample_input.png`.
+- Corrección aplicada: se agregó `Use Sample Input`, apuntando primero a `<repo>\hy3d_v2\test_assets\sample_input.png`.
 - Verificación con `bpy` real en Blender 4.2: `HY3D Self Check` y `Use Sample Input -> Create Job Package` funcionan con la build nueva.
-- Límite actual: no existe `blender.exe` 5.1 accesible en esta máquina, por lo que no se pudo verificar visualmente la UI ni ejecutar el smoke con `bpy` real en 5.1 durante esta sesión.
+- Límite actual: no existe `<path_to_blender_executable>` 5.1 accesible en esta máquina, por lo que no se pudo verificar visualmente la UI ni ejecutar el smoke con `bpy` real en 5.1 durante esta sesión.
 - Dado que Blender 5.1 seguía mostrando comportamiento inconsistente con el add-on `hy3d_v2`, se creó un add-on nuevo y limpio `hy3d_v2_clean`, con paquete, panel, operadores y workspace distintos.
 - El add-on limpio no reutiliza `bl_idname` ni `Panel ID` del add-on anterior y no depende del estado previo de `hy3d_v2` dentro de Blender.
 - Build previa funcional del add-on limpio: `hy3d_v2_clean_20260520_1230`.
 - Build actual del add-on limpio con Cloud Worker: `hy3d_v2_clean_20260521_1535_cloud`.
 - Primer smoke real del add-on limpio en Blender 4.2: exitoso de punta a punta sin traceback en el flujo local mínimo.
-- Estado Blender 5.1 del add-on limpio: el árbol `C:\Users\Jona_\AppData\Roaming\Blender Foundation\Blender\5.1\scripts\addons\hy3d_v2_clean` fue instalado y el ZIP contiene la estructura correcta, pero no se pudo ejecutar Blender 5.1 en esta máquina para verificar la UI o el flujo con `bpy` real.
+- Estado Blender 5.1 del add-on limpio: el árbol `<blender_user_data>\5.1\scripts\addons\hy3d_v2_clean` fue instalado y el ZIP contiene la estructura correcta, pero no se pudo ejecutar Blender 5.1 en esta máquina para verificar la UI o el flujo con `bpy` real.
 - La sesión anterior había dejado `hy3d_v2_clean/__init__.py` a medio integrar para Cloud Worker.
 - Corrección aplicada: se terminó la integración limpia con propiedades, helpers, operadores y UI simple para `Select Primary Image`, `Send Job to Cloud`, `Check Cloud Results`, `Import Cloud Result` y `Open Cloud Folder`.
 - Error corregido durante esta sesión: `send_job_to_cloud()` y `check_cloud_results()` validaban el job contra `workspace_root()` global en vez del `root` recibido; ahora usan la raíz explícita y son testeables fuera de Blender.
 - Estado honesto actual: la capa Cloud Worker del add-on limpio quedó verificada por pruebas de filesystem y contrato, no por un smoke real Blender 5.1 -> Drive -> Colab -> Blender.
-- Antes de instalar TripoSR local nuevo, se ejecutó un probe aislado de PyTorch CPU en `E:\3D_ENGINES\triposr-local`.
+- Antes de instalar TripoSR local nuevo, se ejecutó un probe aislado de PyTorch CPU en `<external_engines_root>\\triposr-local`.
 - El primer intento del wrapper falló por interpolación inválida de `${LASTEXITCODE}` dentro de una cadena PowerShell; se corrigió en el propio wrapper.
 - El segundo intento del wrapper falló por invocación ambigua del ejecutable base de Python desde un array PowerShell; se corrigió devolviendo `Executable` y `PrefixArgs` de forma explícita.
 - Resultado final del probe: `torch 2.12.0+cpu` importó correctamente, `cuda_available = false` y `tensor_test_ok = true`.
 - Cambio temporal de enfoque confirmado: no se seguirá empujando Colab/Drive en esta fase y se auditó una ruta local controlada para TripoSR antes de tocar Blender.
 - Resultado real del setup local final: `setup_triposr_local.ps1` sí completó la instalación aislada con `success = true`, `torch 2.12.0+cpu` y `cuda_available = false`.
-- Resultado real del smoke local final: `test_triposr_local.ps1` primero descartó el asset `1x1`, luego repitió el smoke con `real_smoke_input.png` (`512x512`, `RGB`) y produjo `mesh.glb` en `E:\3D_ENGINES\triposr-local\outputs\smoke\0\mesh.glb`.
-- Resultado real del wrapper local final: `run_triposr_local.ps1` generó `E:\3D_ENGINES\triposr-local\outputs\job_test\result_package.zip` y ese ZIP fue importable por HY3D v2 Clean en el workspace fallback.
+- Resultado real del smoke local final: `test_triposr_local.ps1` primero descartó el asset `1x1`, luego repitió el smoke con `real_smoke_input.png` (`512x512`, `RGB`) y produjo `mesh.glb` en `<external_engines_root>\\triposr-local\outputs\smoke\0\mesh.glb`.
+- Resultado real del wrapper local final: `run_triposr_local.ps1` generó `<external_engines_root>\\triposr-local\outputs\job_test\result_package.zip` y ese ZIP fue importable por HY3D v2 Clean en el workspace fallback.
 - Decisión de fase: no construir todavía `HY3D Local Connector`, pero sí continuar después con integración local porque ya existe una base real funcional en CPU local con smoke y package importable.
 
 ## Pendientes
@@ -835,7 +965,7 @@ Estado honesto del smoke reforzado:
 - Estructura preparada para `v2` desde `accepted_model.glb`.
 - Add-on sin strings o rutas legacy en su superficie actual.
 - Empaquetado reproducible del add-on mediante `hy3d_v2/scripts/package_blender_addon.py`.
-- ZIP runtime limpio en `E:\3DV4\dist\hy3d_v2_addon.zip`.
+- ZIP runtime limpio en `<repo>\dist\hy3d_v2_addon.zip`.
 - Detección del add-on por Blender 4.2 como módulo `hy3d_v2` con nombre visible `HY3D v2`.
 - Validación común de rutas en el add-on para evitar tratar `""` como `Path('.')`.
 - Validación central `_resolve_existing_file/_resolve_existing_dir` para impedir que rutas vacías terminen como `"."`.
@@ -869,37 +999,37 @@ Estado honesto del smoke reforzado:
 - `Import Cloud Result` reutiliza la lógica actual de `Import Result Package`.
 - Las carpetas cloud faltantes bajo una raíz válida se crean automáticamente: `incoming`, `processing`, `completed`, `failed`, `logs`, `notebooks`.
 - El notebook implementa modo manual y modo Drive Worker sin cambiar el contrato local de candidato/accepted/STL.
-- El add-on actualizado fue reempaquetado en `E:\3DV4\dist\hy3d_v2_addon.zip`.
+- El add-on actualizado fue reempaquetado en `<repo>\dist\hy3d_v2_addon.zip`.
 - `ADDON_BUILD_ID = hy3d_v2_20260520_1155_routesafe` existe y se imprime al registrar el add-on.
 - La UI del add-on ahora muestra `HY3D v2 Build: hy3d_v2_20260520_1155_routesafe`.
 - `HY3D Self Check` existe y reporta el estado runtime del add-on.
 - `Reset HY3D Session` existe y limpia el estado de UI.
-- `Use Sample Input` existe y selecciona `E:\3DV4\hy3d_v2\test_assets\sample_input.png` si el archivo está presente.
+- `Use Sample Input` existe y selecciona `<repo>\hy3d_v2\test_assets\sample_input.png` si el archivo está presente.
 - `Create Job Package` ahora valida estrictamente `primary_image_path` antes de llamar al core.
-- El add-on instalado en `C:\Users\Jona_\AppData\Roaming\Blender Foundation\Blender\5.1\scripts\addons\hy3d_v2\blender_addon\__init__.py` contiene la build `hy3d_v2_20260520_1155_routesafe`.
+- El add-on instalado en `<blender_user_data>\5.1\scripts\addons\hy3d_v2\blender_addon\__init__.py` contiene la build `hy3d_v2_20260520_1155_routesafe`.
 - Verificación con Blender 4.2 y `bpy` real:
-  - `Self Check` imprimió la ruta cargada `C:\Users\Jona_\AppData\Roaming\Blender Foundation\Blender\4.2\scripts\addons\hy3d_v2\blender_addon\__init__.py`
-  - `Self Check` imprimió `workspace_root = C:\Users\Jona_\AppData\Roaming\Blender Foundation\Blender\4.2\datafiles\hy3d_v2_workspace`
+  - `Self Check` imprimió la ruta cargada `<blender_user_data>\4.2\scripts\addons\hy3d_v2\blender_addon\__init__.py`
+  - `Self Check` imprimió `workspace_root = <blender_user_data>\4.2\datafiles\hy3d_v2_workspace`
   - `Use Sample Input` terminó en `FINISHED`
   - `Create Job Package` terminó en `FINISHED`
   - `job_id = job_1865dccc27f0`
-  - `job_package_path = C:\Users\Jona_\AppData\Roaming\Blender Foundation\Blender\4.2\datafiles\hy3d_v2_workspace\jobs\job_1865dccc27f0\job_package.zip`
-- Existe un add-on nuevo y aislado en `E:\3DV4\hy3d_v2_clean_addon\hy3d_v2_clean\`.
-- Existe un artefacto instalable limpio en `E:\3DV4\dist\hy3d_v2_clean_addon.zip`.
+  - `job_package_path = <blender_user_data>\4.2\datafiles\hy3d_v2_workspace\jobs\job_1865dccc27f0\job_package.zip`
+- Existe un add-on nuevo y aislado en `<repo>\hy3d_v2_clean_addon\hy3d_v2_clean\`.
+- Existe un artefacto instalable limpio en `<repo>\dist\hy3d_v2_clean_addon.zip`.
 - El ZIP limpio contiene raíz `hy3d_v2_clean/` y un `hy3d_core` vendorized dentro del paquete, sin tests ni docs.
 - El add-on limpio usa workspace separado:
   - `bpy.utils.user_resource("DATAFILES", path="hy3d_v2_clean_workspace", create=True)`
 - Existe un entorno externo aislado para probe PyTorch CPU:
-  - `E:\3D_ENGINES\triposr-local`
-  - `E:\3D_ENGINES\triposr-local\.venv`
-  - `E:\3D_ENGINES\triposr-local\pytorch_probe_report.json`
+  - `<external_engines_root>\\triposr-local`
+  - `<external_engines_root>\\triposr-local\.venv`
+  - `<external_engines_root>\\triposr-local\pytorch_probe_report.json`
 - El probe aislado confirmó:
   - `cuda_available = false`
   - `tensor_test_ok = true`
 - Existen wrappers aislados para evaluar TripoSR local sin tocar el core ni los add-ons activos:
-  - `E:\3D_ENGINES\wrappers\setup_pytorch_cpu_probe.ps1`
-  - `E:\3D_ENGINES\wrappers\setup_triposr_local.ps1`
-  - `E:\3D_ENGINES\wrappers\test_triposr_local.ps1`
+  - `<repo>\\tools\\triposr\setup_pytorch_cpu_probe.ps1`
+  - `<repo>\\tools\\triposr\setup_triposr_local.ps1`
+  - `<repo>\\tools\\triposr\test_triposr_local.ps1`
 - El add-on limpio es la interfaz oficial de Blender para HY3D v2.
 - El add-on viejo `hy3d_v2` queda deprecated para uso interactivo en Blender.
 - El add-on limpio expone la UI simple en este orden:
@@ -946,8 +1076,8 @@ Estado honesto del smoke reforzado:
   - `Accept Selected Object` -> `FINISHED`
   - `Export STL From Accepted` -> `FINISHED`
   - `job_id = job_d03392184a37`
-  - `job_package_path = C:\Users\Jona_\AppData\Roaming\Blender Foundation\Blender\4.2\datafiles\hy3d_v2_clean_workspace\jobs\job_d03392184a37\job_package.zip`
-  - `accepted_model_path = C:\Users\Jona_\AppData\Roaming\Blender Foundation\Blender\4.2\datafiles\hy3d_v2_clean_workspace\jobs\job_d03392184a37\versions\v1\accepted\accepted_model.glb`
+  - `job_package_path = <blender_user_data>\4.2\datafiles\hy3d_v2_clean_workspace\jobs\job_d03392184a37\job_package.zip`
+  - `accepted_model_path = <blender_user_data>\4.2\datafiles\hy3d_v2_clean_workspace\jobs\job_d03392184a37\versions\v1\accepted\accepted_model.glb`
 
 ### Parcialmente implementado
 - Validación geométrica: ligera y dependiente de librerías opcionales.
@@ -968,10 +1098,10 @@ Estado honesto del smoke reforzado:
 - Smoke completo del add-on limpio en Blender 5.1 con UI visible y selección manual del objeto candidato.
 
 ## Artefacto instalable actual
-- ZIP del add-on: `E:\3DV4\dist\hy3d_v2_addon.zip`
+- ZIP del add-on: `<repo>\dist\hy3d_v2_addon.zip`
 - Punto de entrada Blender: `hy3d_v2/__init__.py`
 - El paquete incluye el core necesario para que el add-on no dependa de un backend separado.
-- ZIP del add-on limpio: `E:\3DV4\dist\hy3d_v2_clean_addon.zip`
+- ZIP del add-on limpio: `<repo>\dist\hy3d_v2_clean_addon.zip`
 - Punto de entrada Blender del add-on limpio: `hy3d_v2_clean/__init__.py`
 - Build actual del add-on limpio empaquetado: `hy3d_v2_clean_20260521_1535_cloud`
 
@@ -1007,7 +1137,7 @@ Estado honesto del smoke reforzado:
   Motivo: corregir importación del paquete durante `pytest`.
 - Archivo: `hy3d_v2/__init__.py`
   Motivo: exponer `bl_info`, `register` y `unregister` para instalación del add-on como paquete.
-- Archivo: `E:\3DV4\hy3d_v2_addon.zip`
+- Archivo: `<repo>\hy3d_v2_addon.zip`
   Motivo: artefacto instalable del add-on para Blender empaquetado desde el paquete `hy3d_v2`.
 ### 2026-05-20
 - Archivo: `hy3d_v2/blender_addon/__init__.py`
@@ -1018,7 +1148,7 @@ Estado honesto del smoke reforzado:
   Motivo: validar copia de ZIP a `incoming`, creación de `cloud_status.json`, detección de `completed`, tolerancia a resultado ausente, detección de `failed`, creación de carpetas cloud y contrato de nombres.
 - Archivo: `hy3d_v2/tests/test_addon_contract.py`
   Motivo: verificar que `Import Cloud Result` reutiliza la lógica de `Import Result Package` en lugar de duplicarla.
-- Archivo: `E:\3DV4\dist\hy3d_v2_addon.zip`
+- Archivo: `<repo>\dist\hy3d_v2_addon.zip`
   Motivo: regeneración del add-on empaquetado después de la capa Google Drive.
 - Archivo: `hy3d_v2/blender_addon/__init__.py`
   Motivo: agregar `ADDON_BUILD_ID`, `HY3D Self Check`, `Reset HY3D Session`, `Use Sample Input`, `job_package_path` y validación estricta de `primary_image_path` antes de `Create Job Package`.
@@ -1026,15 +1156,15 @@ Estado honesto del smoke reforzado:
   Motivo: cubrir bloqueo de `Create Job Package` sin imagen primaria, rechazo de `"."`, rechazo de directorio como imagen, aceptación de imagen válida y verificación del build/self-check.
 - Archivo: `hy3d_v2/tests/test_addon_contract.py`
   Motivo: verificar que el `Build ID` quede visible en la UI fuente del add-on.
-- Archivo: `E:\3DV4\dist\hy3d_v2_addon.zip`
+- Archivo: `<repo>\dist\hy3d_v2_addon.zip`
   Motivo: regeneración del add-on con la build `hy3d_v2_20260520_1155_routesafe`.
-- Archivo instalado auditado: `C:\Users\Jona_\AppData\Roaming\Blender Foundation\Blender\5.1\scripts\addons\hy3d_v2\blender_addon\__init__.py`
+- Archivo instalado auditado: `<blender_user_data>\5.1\scripts\addons\hy3d_v2\blender_addon\__init__.py`
   Motivo: confirmar que la build nueva sí quedó instalada en el árbol real de Blender 5.1.
 - Archivo: `hy3d_v2/__init__.py`
   Motivo: hacer explícito `bl_info` en el entrypoint raíz y delegar `register`/`unregister` al submódulo del add-on para compatibilidad con el escáner de Blender.
 - Archivo: `hy3d_v2/scripts/package_blender_addon.py`
   Motivo: crear empaquetado reproducible y mínimo del add-on sin carpeta superior extra ni archivos de prueba/documentación dentro del ZIP runtime.
-- Archivo: `E:\3DV4\dist\hy3d_v2_addon.zip`
+- Archivo: `<repo>\dist\hy3d_v2_addon.zip`
   Motivo: nuevo artefacto instalable verificado por Blender 4.2 como módulo `hy3d_v2` con nombre visible `HY3D v2`.
 - Archivo: `hy3d_v2/blender_addon/__init__.py`
   Motivo: agregar validación común de rutas, bloquear operadores con rutas vacías o inválidas y deshabilitar acciones de UI cuando aún no existe un candidato o accepted válido.
@@ -1044,7 +1174,7 @@ Estado honesto del smoke reforzado:
   Motivo: cubrir los casos de `""` y `"."`, bloqueo de importación de candidato, bloqueo de exportación STL sin accepted y rechazo de result package inválido.
 - Archivo: `hy3d_v2/blender_addon/__init__.py`
   Motivo: limpiar rutas de sesión al crear jobs o importar nuevos resultados y corregir compatibilidad de exportación STL para Blender 5.x mediante `wm.stl_export`.
-- Archivo: `E:\3DV4\dist\hy3d_v2_addon.zip`
+- Archivo: `<repo>\dist\hy3d_v2_addon.zip`
   Motivo: nuevo paquete regenerado después de corregir el manejo de rutas heredadas y la exportación STL dependiente de versión.
 - Archivo: `hy3d_v2/test_assets/sample_input.png`
   Motivo: asset de entrada local para demostrar el flujo mínimo sin IA externa.
@@ -1072,72 +1202,72 @@ Estado honesto del smoke reforzado:
   Motivo: agregar cobertura de `edited_model.glb`, promoción desde edited y rechazo de ZIPs inseguros o incompletos.
 - Archivo: `hy3d_v2/scripts/create_result_package.py`, `create_job_package.py`, `import_result_package.py`, `validate_candidate.py`, `export_stl.py`
   Motivo: permitir ejecución directa desde CLI resolviendo el paquete `hy3d_v2` sin depender del contexto de importación.
-- Archivo: `E:\3DV4\dist\hy3d_v2_addon.zip`
+- Archivo: `<repo>\dist\hy3d_v2_addon.zip`
   Motivo: paquete regenerado después de introducir `test_assets` reales, aliases mínimos del core y workspace externo al add-on instalado.
-- Archivo: `E:\3DV4\hy3d_v2_clean_addon\hy3d_v2_clean\__init__.py`
+- Archivo: `<repo>\hy3d_v2_clean_addon\hy3d_v2_clean\__init__.py`
   Motivo: creación del add-on limpio `hy3d_v2_clean` con IDs nuevos, workspace independiente, smoke local mínimo y sin dependencia del estado previo de `hy3d_v2` dentro de Blender.
-- Archivo: `E:\3DV4\hy3d_v2_clean_addon\hy3d_v2_clean\hy3d_core\...`
+- Archivo: `<repo>\hy3d_v2_clean_addon\hy3d_v2_clean\hy3d_core\...`
   Motivo: vendorizar el core local actual dentro del add-on limpio para que el paquete sea autónomo al instalarse en Blender.
 - Archivo: `hy3d_v2/tests/test_clean_addon.py`
   Motivo: validar `bl_info` limpio, ausencia de IDs legacy, workspace limpio, existencia de sample assets y bloqueo de rutas vacías o `"."`.
 - Archivo: `hy3d_v2/scripts/package_blender_clean_addon.py`
-  Motivo: empaquetado reproducible del add-on limpio en `E:\3DV4\dist\hy3d_v2_clean_addon.zip` sin tests, docs ni `__pycache__`.
-- Archivo: `E:\3DV4\dist\hy3d_v2_clean_addon.zip`
+  Motivo: empaquetado reproducible del add-on limpio en `<repo>\dist\hy3d_v2_clean_addon.zip` sin tests, docs ni `__pycache__`.
+- Archivo: `<repo>\dist\hy3d_v2_clean_addon.zip`
   Motivo: artefacto instalable limpio para Blender 5.1 con raíz `hy3d_v2_clean/`.
-- Árbol instalado: `C:\Users\Jona_\AppData\Roaming\Blender Foundation\Blender\5.1\scripts\addons\hy3d_v2_clean`
+- Árbol instalado: `<blender_user_data>\5.1\scripts\addons\hy3d_v2_clean`
   Motivo: instalar el add-on limpio de forma aislada, sin borrar aún `hy3d_v2`.
 ### 2026-05-21
-- Archivo: `E:\3DV4\hy3d_v2_clean_addon\hy3d_v2_clean\__init__.py`
+- Archivo: `<repo>\hy3d_v2_clean_addon\hy3d_v2_clean\__init__.py`
   Motivo: completar la integración Cloud Worker en el add-on limpio, añadir `Select Primary Image`, endurecer validaciones de rutas, reutilizar `import_result_package()` y cerrar la UI simple oficial.
 - Archivo: `hy3d_v2/tests/test_clean_addon.py`
   Motivo: ampliar cobertura del add-on limpio para selección de imagen, envío a cloud, detección de `completed/failed/not_ready`, reuse del importador del core y ausencia de IDs legacy.
-- Archivo: `E:\3DV4\dist\hy3d_v2_clean_addon.zip`
+- Archivo: `<repo>\dist\hy3d_v2_clean_addon.zip`
   Motivo: regenerar el artefacto instalable limpio con la build `hy3d_v2_clean_20260521_1535_cloud`.
-- Archivo: `E:\3D_ENGINES\wrappers\setup_pytorch_cpu_probe.ps1`
-  Motivo: crear un wrapper aislado para validar PyTorch CPU, caches y temporales fuera de `E:\3DV4\hy3d_v2` antes de cualquier instalación local de TripoSR.
-- Archivo generado: `E:\3D_ENGINES\triposr-local\pytorch_probe.py`
+- Archivo: `<repo>\\tools\\triposr\setup_pytorch_cpu_probe.ps1`
+  Motivo: crear un wrapper aislado para validar PyTorch CPU, caches y temporales fuera de `<repo>\hy3d_v2` antes de cualquier instalación local de TripoSR.
+- Archivo generado: `<external_engines_root>\\triposr-local\pytorch_probe.py`
   Motivo: ejecutar un probe mínimo de importación `torch`, consulta de CUDA y operación tensorial básica dentro del venv aislado.
-- Archivo generado: `E:\3D_ENGINES\triposr-local\pytorch_probe_report.json`
+- Archivo generado: `<external_engines_root>\\triposr-local\pytorch_probe_report.json`
   Motivo: registrar el resultado verificable del probe PyTorch CPU (`torch_version`, `cuda_available`, `tensor_test_ok`, `tensor_test_seconds`) para decidir si conviene continuar con TripoSR local CPU.
-- Archivo: `E:\3D_ENGINES\wrappers\setup_triposr_local.ps1`
+- Archivo: `<repo>\\tools\\triposr\setup_triposr_local.ps1`
   Motivo: completar una instalación aislada y reproducible de TripoSR local sobre el venv externo, separando `torchmcubes` en modo CPU, fijando dependencias compatibles y registrando `install_report.json`.
-- Archivo generado: `E:\3D_ENGINES\triposr-local\install_report.json`
+- Archivo generado: `<external_engines_root>\\triposr-local\install_report.json`
   Motivo: dejar evidencia verificable de que el setup local sí quedó sano (`success = true`) con `torch 2.12.0+cpu`, `cuda_available = false` y duración real del setup.
-- Archivo: `E:\3D_ENGINES\wrappers\test_triposr_local.ps1`
+- Archivo: `<repo>\\tools\\triposr\test_triposr_local.ps1`
   Motivo: validar dimensiones de imagen, exigir `real_smoke_input.png`, registrar `image_width/image_height/image_mode` en `smoke_report.json` y ejecutar el smoke real contra un asset válido antes de invertir en integración Blender.
-- Archivo generado: `E:\3D_ENGINES\triposr-local\smoke_report.json`
+- Archivo generado: `<external_engines_root>\\triposr-local\smoke_report.json`
   Motivo: registrar el estado final del smoke válido con `real_smoke_input.png`: `success = true`, `status = success`, `duration_seconds = 329.007`, `image_width = 512`, `image_height = 512`, `output_glb = mesh.glb` y `local_cpu_practical = true`.
-- Archivo generado: `E:\3DV4\hy3d_v2\test_assets\real_smoke_input.png`
-  Motivo: repetir el smoke con una imagen real válida (`512x512`, `RGB`) derivada de `C:\Users\Jona_\Downloads\C5.jpg` después de demostrar que `sample_input.png` era `1x1` y no servía para evaluar TripoSR local CPU.
-- Archivo: `E:\3D_ENGINES\wrappers\run_triposr_local.ps1`
+- Archivo generado: `<repo>\hy3d_v2\test_assets\real_smoke_input.png`
+  Motivo: repetir el smoke con una imagen real válida (`512x512`, `RGB`) derivada de `<user_downloads>\C5.jpg` después de demostrar que `sample_input.png` era `1x1` y no servía para evaluar TripoSR local CPU.
+- Archivo: `<repo>\\tools\\triposr\run_triposr_local.ps1`
   Motivo: convertir una imagen local en `result_package.zip` compatible con HY3D, con validación de input, ejecución CPU, empaquetado, `run_report.json` y `error.json`.
-- Archivo generado: `E:\3D_ENGINES\triposr-local\outputs\job_test\result_package.zip`
+- Archivo generado: `<external_engines_root>\\triposr-local\outputs\job_test\result_package.zip`
   Motivo: validar el empaquetado local end to end con `job_id = job_test`, `version_id = v1`, incluyendo `result_manifest.json`, `model.glb`, `engine_output/model.glb` y `logs/engine_log.txt`.
-- Archivo generado: `E:\3D_ENGINES\triposr-local\outputs\job_test\run_report.json`
+- Archivo generado: `<external_engines_root>\\triposr-local\outputs\job_test\run_report.json`
   Motivo: registrar el resultado final del wrapper local con `success = true`, `status = completed`, `duration_seconds = 73.04`, `result_package.zip` y `local_cpu_practical = true`.
 ### 2026-05-22
-- Archivo: `E:\3DV4\hy3d_local_connector_addon\hy3d_local_connector\__init__.py`
+- Archivo: `<repo>\hy3d_local_connector_addon\hy3d_local_connector\__init__.py`
   Motivo: crear el add-on separado `HY3D Local Connector` con `Self Check`, `Reset Session`, selección de imagen, ejecución local de `run_triposr_local.ps1`, importación de `result_package.zip`, importación de candidato, revisión básica, aceptación a `accepted_model.glb` y exportación a `accepted_model.stl` sin tocar `hy3d_v2_clean`, el add-on legacy ni rutas cloud.
-- Archivo: `E:\3DV4\hy3d_v2\scripts\package_blender_local_connector.py`
-  Motivo: empaquetado reproducible y mínimo del add-on local en `E:\3DV4\dist\hy3d_local_connector_addon.zip`, incluyendo solo `hy3d_local_connector/__init__.py`.
-- Archivo: `E:\3DV4\hy3d_v2\tests\test_local_connector_addon.py`
+- Archivo: `<repo>\hy3d_v2\scripts\package_blender_local_connector.py`
+  Motivo: empaquetado reproducible y mínimo del add-on local en `<repo>\dist\hy3d_local_connector_addon.zip`, incluyendo solo `hy3d_local_connector/__init__.py`.
+- Archivo: `<repo>\hy3d_v2\tests\test_local_connector_addon.py`
   Motivo: cubrir IDs únicos del add-on, ausencia de IDs legacy, rutas del wrapper, `engine check`, validación de `result_package.zip` y bloqueo de STL cuando no existe `accepted_model.glb`.
-- Archivo generado: `E:\3DV4\dist\hy3d_local_connector_addon.zip`
+- Archivo generado: `<repo>\dist\hy3d_local_connector_addon.zip`
   Motivo: artefacto instalable del nuevo conector local, verificado con contenido exacto `hy3d_local_connector/__init__.py`.
 - Verificación ejecutada: `pytest -q hy3d_v2/tests`
   Motivo: validar el árbol actual completo después de introducir el conector local; resultado final `54 passed in 23.61s`.
 - Verificación ejecutada: importación del `result_package.zip` del wrapper local mediante `_import_result_package_into_session()` del nuevo add-on fuera de Blender.
-  Motivo: confirmar reutilización del contrato del core y poblar un candidato real en `E:\3DV4\hy3d_local_connector_workspace\jobs\job_54a947ab9171\versions\v1\engine_output\model.glb`.
+  Motivo: confirmar reutilización del contrato del core y poblar un candidato real en `<repo>\hy3d_local_connector_workspace\jobs\job_54a947ab9171\versions\v1\engine_output\model.glb`.
 
 ## HY3D Local Connector
 
-- Estado: creado como add-on separado en `E:\3DV4\hy3d_local_connector_addon\hy3d_local_connector`.
-- Wrapper local reutilizado: `E:\3D_ENGINES\wrappers\run_triposr_local.ps1`.
-- Resultado base del wrapper: `success = true`, `status = completed`, `duration_seconds = 73.04`, `output_glb = E:\3D_ENGINES\triposr-local\outputs\job_test\engine_raw\0\mesh.glb`.
+- Estado: creado como add-on separado en `<repo>\hy3d_local_connector_addon\hy3d_local_connector`.
+- Wrapper local reutilizado: `<repo>\\tools\\triposr\run_triposr_local.ps1`.
+- Resultado base del wrapper: `success = true`, `status = completed`, `duration_seconds = 73.04`, `output_glb = <external_engines_root>\\triposr-local\outputs\job_test\engine_raw\0\mesh.glb`.
 - `result_package.zip`: importable y ya validado previamente contra `HY3D v2 Clean`; además, el nuevo conector local ya reusa el mismo contrato del core para importarlo.
 - Reglas conservadas: `model.glb` nunca se usa para STL; la ruta soportada sigue siendo `accepted_model.glb -> accepted_model.stl`.
 - Errores encontrados en esta fase: ninguno nuevo en código o pruebas; el único error histórico relevante fue el BOM en `result_manifest.json`, ya corregido en el wrapper antes de esta integración.
-- Pendientes: instalar `E:\3DV4\dist\hy3d_local_connector_addon.zip` en Blender y ejecutar el smoke manual del panel/UI del add-on nuevo dentro de Blender.
+- Pendientes: instalar `<repo>\dist\hy3d_local_connector_addon.zip` en Blender y ejecutar el smoke manual del panel/UI del add-on nuevo dentro de Blender.
 
 ## Cierre de flujo GLB/STL
 
@@ -1151,18 +1281,18 @@ Estado honesto del smoke reforzado:
 - Validación mínima STL cerrada: `exists`, `file_size`, `readable`, `component_count`, `bbox`, `watertight`, `manifold`, `printability_status`, con degradación honesta a `validation_unavailable` cuando no hay stack geométrico suficiente.
 - Dependencias opcionales: la validación usa `trimesh` cuando está disponible, intenta `pyvista` cuando está disponible y no bloquea todo si falta alguno.
 - Smoke de contrato ejecutado fuera de Blender:
-  - workspace: `E:\3DV4\hy3d_local_connector_workspace_smoke`
+  - workspace: `<repo>\hy3d_local_connector_workspace_smoke`
   - job_id: `job_31e840aabde1`
-  - candidato: `E:\3DV4\hy3d_local_connector_workspace_smoke\jobs\job_31e840aabde1\versions\v1\engine_output\model.glb`
-  - accepted: `E:\3DV4\hy3d_local_connector_workspace_smoke\jobs\job_31e840aabde1\versions\v1\accepted\accepted_model.glb`
-  - stl: `E:\3DV4\hy3d_local_connector_workspace_smoke\jobs\job_31e840aabde1\versions\v1\accepted\accepted_model.stl`
+  - candidato: `<repo>\hy3d_local_connector_workspace_smoke\jobs\job_31e840aabde1\versions\v1\engine_output\model.glb`
+  - accepted: `<repo>\hy3d_local_connector_workspace_smoke\jobs\job_31e840aabde1\versions\v1\accepted\accepted_model.glb`
+  - stl: `<repo>\hy3d_local_connector_workspace_smoke\jobs\job_31e840aabde1\versions\v1\accepted\accepted_model.stl`
   - `accepted_manifest.json`: generado con `source_type = selected_object`
   - `stl_validation_report.json`: generado
   - `printability_status` del smoke: `needs_cleanup`
 - Pruebas realizadas:
   - `pytest -q hy3d_v2/tests/test_phase1_flow.py hy3d_v2/tests/test_local_connector_addon.py` -> `20 passed in 4.26s`
   - `pytest -q hy3d_v2/tests` -> `56 passed in 5.07s`
-  - empaquetado regenerado: `E:\3DV4\dist\hy3d_local_connector_addon.zip`
+  - empaquetado regenerado: `<repo>\dist\hy3d_local_connector_addon.zip`
   - contenido verificado del ZIP: solo `hy3d_local_connector/__init__.py`
 - Errores encontrados en esta fase: ninguno nuevo durante el cierre GLB/STL.
 - Pendientes:
@@ -1183,12 +1313,12 @@ Estado honesto del smoke reforzado:
   - `Import Candidate GLB` para `model.glb`
   - `Import Repaired Candidate GLB` para `repaired_candidate.glb`
   - Ninguno se acepta automáticamente.
-- Smoke real del gate sobre `E:\3D_ENGINES\triposr-local\outputs\job_test\result_package.zip`:
-  - workspace: `E:\3DV4\hy3d_local_connector_mesh_gate_smoke`
+- Smoke real del gate sobre `<external_engines_root>\\triposr-local\outputs\job_test\result_package.zip`:
+  - workspace: `<repo>\hy3d_local_connector_mesh_gate_smoke`
   - job_id: `job_33130767d4c2`
   - `mesh_quality_report.json`: generado
   - `repair_recommended`: `true`
-  - `repaired_candidate.glb`: `E:\3DV4\hy3d_local_connector_mesh_gate_smoke\jobs\job_33130767d4c2\versions\v1\engine_output\repaired_candidate.glb`
+  - `repaired_candidate.glb`: `<repo>\hy3d_local_connector_mesh_gate_smoke\jobs\job_33130767d4c2\versions\v1\engine_output\repaired_candidate.glb`
   - `repair_strategy`: `trimesh_light_repair+pymeshfix_unavailable`
 - Pruebas realizadas:
   - `pytest -q hy3d_v2/tests/test_phase1_flow.py hy3d_v2/tests/test_local_connector_addon.py` -> `23 passed in 6.44s`
@@ -1205,10 +1335,10 @@ Estado honesto del smoke reforzado:
 
 ## Engine Output vs HY3D Workspace
 
-- Problema operativo cerrado: un job puede existir primero solo como salida del motor en `E:\3D_ENGINES\triposr-local\outputs\job_<id>` y todavía no existir como job importado dentro del workspace HY3D.
+- Problema operativo cerrado: un job puede existir primero solo como salida del motor en `<external_engines_root>\\triposr-local\outputs\job_<id>` y todavía no existir como job importado dentro del workspace HY3D.
 - Separación explícita establecida:
-  - salida del motor: `E:\3D_ENGINES\triposr-local\outputs\job_<id>`
-  - job importado a HY3D: `E:\3DV4\hy3d_local_connector_workspace\jobs\job_<hy3d_id>\versions\v1\...`
+  - salida del motor: `<external_engines_root>\\triposr-local\outputs\job_<id>`
+  - job importado a HY3D: `<repo>\hy3d_local_connector_workspace\jobs\job_<hy3d_id>\versions\v1\...`
   - modelo aceptado: `...\accepted\accepted_model.glb`
   - STL final: `...\accepted\accepted_model.stl`
 - Estados agregados al conector local:
@@ -1220,7 +1350,7 @@ Estado honesto del smoke reforzado:
   - `stl_exported`
   - `stl_validated`
 - Archivo nuevo de trazabilidad: `local_engine_status.json`
-  - ubicación: dentro de la carpeta del motor `E:\3D_ENGINES\triposr-local\outputs\job_<id>\local_engine_status.json`
+  - ubicación: dentro de la carpeta del motor `<external_engines_root>\\triposr-local\outputs\job_<id>\local_engine_status.json`
   - campos principales: `engine_job_id`, `engine_output_dir`, `result_package_path`, `hy3d_imported`, `hy3d_job_id`, `accepted_model_path`, `stl_path`, `stl_validation_report_path`, `printability_report_path`, `exports_folder`, `status`
 - Después de `Run Local TripoSR`:
   - se guarda `engine_job_id`
@@ -1241,7 +1371,7 @@ Estado honesto del smoke reforzado:
 - Después de `Export STL From Accepted`:
   - estado: `stl_exported`
   - se registra `stl_path`
-  - se copian artefactos al directorio fácil `E:\3DV4\HY3D_EXPORTS\job_<engine_job_id>\`
+  - se copian artefactos al directorio fácil `<repo>\HY3D_EXPORTS\job_<engine_job_id>\`
 - Después de `Validate STL`:
   - estado: `stl_validated`
   - se registran `stl_validation_report_path` y `printability_report_path`
@@ -1260,16 +1390,16 @@ Estado honesto del smoke reforzado:
   - `STL Path`
   - `Exports Folder`
 - Cómo localizar el STL final:
-  - ruta canónica del workflow: `E:\3DV4\hy3d_local_connector_workspace\jobs\job_<hy3d_id>\versions\v1\accepted\accepted_model.stl`
-  - copia fácil para entrega/inspección: `E:\3DV4\HY3D_EXPORTS\job_<engine_job_id>\accepted_model.stl`
+  - ruta canónica del workflow: `<repo>\hy3d_local_connector_workspace\jobs\job_<hy3d_id>\versions\v1\accepted\accepted_model.stl`
+  - copia fácil para entrega/inspección: `<repo>\HY3D_EXPORTS\job_<engine_job_id>\accepted_model.stl`
 - Verificación real con un job del motor existente:
   - job del motor: `job_c8823241e9a5`
-  - output del motor: `E:\3D_ENGINES\triposr-local\outputs\job_c8823241e9a5`
-  - smoke de importación a workspace temporal: `E:\3DV4\hy3d_local_connector_status_smoke`
+  - output del motor: `<external_engines_root>\\triposr-local\outputs\job_c8823241e9a5`
+  - smoke de importación a workspace temporal: `<repo>\hy3d_local_connector_status_smoke`
   - resultado: `local_engine_status.json` quedó en `status = imported_to_hy3d`, `hy3d_imported = true`, `hy3d_job_id = job_5bbbd41d7c1c`
 - Nueva carpeta de exportación fácil:
-  - raíz: `E:\3DV4\HY3D_EXPORTS`
-  - destino por job: `E:\3DV4\HY3D_EXPORTS\job_<engine_job_id>\`
+  - raíz: `<repo>\HY3D_EXPORTS`
+  - destino por job: `<repo>\HY3D_EXPORTS\job_<engine_job_id>\`
   - contenido copiado al exportar STL: `accepted_model.stl`, `accepted_model.glb`, `stl_validation_report.json`, `printability_report.json`
 - Pruebas realizadas:
   - `pytest -q hy3d_v2/tests/test_local_connector_addon.py` -> `15 passed in 5.56s`
@@ -1288,7 +1418,7 @@ Estado honesto del smoke reforzado:
 
 ## Portabilidad y trazabilidad local
 
-- Estado: el add-on `HY3D Local Connector` ya no depende de rutas absolutas `E:\` para resolver proyecto, motor, wrapper o exports.
+- Estado: el add-on `HY3D Local Connector` ya no depende de rutas absolutas personales para resolver proyecto, motor, wrapper o exports.
 - Orden de resolución de configuración:
   1. variables de entorno: `HY3D_PROJECT_ROOT`, `HY3D_ENGINE_ROOT`, `HY3D_WRAPPER_RUN`, `HY3D_EXPORTS_ROOT`
   2. archivo local opcional `hy3d_local_config.json` en la raíz del repo
@@ -1297,7 +1427,7 @@ Estado honesto del smoke reforzado:
 - Defaults relativos:
   - `HY3D_PROJECT_ROOT`: `<repo>/hy3d_v2`
   - `HY3D_ENGINE_ROOT`: `<parent-del-repo>/3D_ENGINES/triposr-local`
-  - `HY3D_WRAPPER_RUN`: `<parent-del-engine>/wrappers/run_triposr_local.ps1`
+  - `HY3D_WRAPPER_RUN`: `<repo>/tools/triposr/run_triposr_local.ps1`
   - `HY3D_EXPORTS_ROOT`: `<repo>/HY3D_EXPORTS`
 - `local_engine_status.json` mantiene los estados permitidos:
   - `no_job`
@@ -1332,7 +1462,190 @@ Estado honesto del smoke reforzado:
   - `hy3d_v2_clean_addon/hy3d_v2_clean/__init__.py`
     Motivo: resolver assets de muestra desde el checkout actual en vez de una ruta absoluta de máquina.
   - `hy3d_v2/tests/test_local_connector_addon.py`
-    Motivo: reemplazar dependencias de `E:\3D_ENGINES` por fixtures temporales y assets locales.
+    Motivo: reemplazar dependencias de `<external_engines_root>` por fixtures temporales y assets locales.
+
+## Transportar HY3D v2 a otra computadora
+
+Objetivo: mover el repo HY3D y el motor TripoSR sin editar codigo fuente.
+
+### Que se clona de GitHub
+
+Clonar el repo completo:
+
+```powershell
+git clone https://github.com/Pega-568/3DV2.git
+cd 3DV2
+```
+
+El repo contiene:
+
+- `hy3d_v2/`
+- `hy3d_local_connector_addon/`
+- `hy3d_v2_clean_addon/`
+- `tools/triposr/run_triposr_local.ps1`
+- `hy3d_local_config.example.json`
+- scripts y tests.
+
+### Que no se sube al repo
+
+No versionar:
+
+- `hy3d_local_config.json`
+- `HY3D_EXPORTS/`
+- `dist/`
+- workspaces `*_workspace/`
+- outputs del motor
+- caches `__pycache__/`, `.pytest_cache/`
+- ZIPs generados.
+
+### Entorno Python
+
+Crear un entorno Python para trabajar con el core:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python -m pip install --upgrade pip
+```
+
+Instalar las dependencias usadas por tests y validacion segun la maquina. Como minimo, el entorno debe poder ejecutar:
+
+```powershell
+python -m pytest hy3d_v2\tests -q
+```
+
+### Preparar TripoSR externo
+
+TripoSR no se sube al repo. Ubicarlo en una carpeta externa, por ejemplo:
+
+```text
+<external_engines_root>/triposr-local/
+  .venv/
+  TripoSR/
+    run.py
+```
+
+El wrapper versionado esta en:
+
+```text
+<repo>/tools/triposr/run_triposr_local.ps1
+```
+
+### Crear config local
+
+Copiar el ejemplo:
+
+```powershell
+python scripts\setup_local_config.py
+```
+
+O manualmente:
+
+```powershell
+copy hy3d_local_config.example.json hy3d_local_config.json
+```
+
+Editar `hy3d_local_config.json` segun la PC:
+
+```json
+{
+  "HY3D_PROJECT_ROOT": ".\\hy3d_v2",
+  "HY3D_ENGINE_ROOT": "..\\3D_ENGINES\\triposr-local",
+  "HY3D_WRAPPER_RUN": ".\\tools\\triposr\\run_triposr_local.ps1",
+  "HY3D_EXPORTS_ROOT": ".\\HY3D_EXPORTS"
+}
+```
+
+`hy3d_local_config.json` es local y no debe subirse.
+
+Tambien se pueden usar variables de entorno:
+
+- `HY3D_PROJECT_ROOT`
+- `HY3D_ENGINE_ROOT`
+- `HY3D_WRAPPER_RUN`
+- `HY3D_EXPORTS_ROOT`
+
+Orden de resolucion:
+
+1. variables de entorno;
+2. `hy3d_local_config.json`;
+3. defaults relativos al repo.
+
+### Empaquetar add-on
+
+Generar ZIP instalable:
+
+```powershell
+python hy3d_v2\scripts\package_blender_local_connector.py
+```
+
+Salida esperada:
+
+```text
+dist/hy3d_local_connector_addon.zip
+```
+
+El ZIP debe contener solo:
+
+```text
+hy3d_local_connector/__init__.py
+```
+
+### Instalar add-on en Blender
+
+En Blender:
+
+1. `Edit > Preferences > Add-ons`
+2. `Install...`
+3. seleccionar `dist/hy3d_local_connector_addon.zip`
+4. activar `HY3D Local Connector`
+5. abrir el panel `HY3D Local`
+6. ejecutar `Self Check`
+
+`Self Check` debe mostrar:
+
+- repo root;
+- project root;
+- engine root;
+- wrapper path;
+- exports root;
+- si cada ruta existe;
+- recomendacion si falta algo.
+
+### Probar sin TripoSR
+
+Una PC sin TripoSR puede revisar paquetes ya generados:
+
+1. seleccionar o tener una imagen primaria;
+2. usar `Import Existing Result Package`;
+3. elegir un `result_package.zip` compatible;
+4. importar candidato;
+5. aceptar manualmente el objeto seleccionado;
+6. exportar STL desde accepted.
+
+Este flujo no requiere motor instalado.
+
+### Probar con TripoSR local
+
+Con `HY3D_ENGINE_ROOT` y `HY3D_WRAPPER_RUN` configurados:
+
+1. `Self Check`;
+2. seleccionar imagen;
+3. `Run Local TripoSR`;
+4. `Import Local Result`;
+5. revisar candidato original y reparados;
+6. aceptar manualmente;
+7. exportar STL.
+
+### Verificacion de portabilidad
+
+Ejecutar:
+
+```powershell
+python scripts\check_portability.py
+python -m pytest hy3d_v2\tests -q
+```
+
+`check_portability.py` valida que no haya rutas personales en codigo fuente principal, que exista el wrapper versionado, que exista el config example y que `hy3d_local_config.json` este ignorado.
 
 ## Mesh Repair & Quality Benchmark
 
@@ -1532,3 +1845,4 @@ Estado honesto del smoke reforzado:
   - abrir Blender con el add-on instalado.
   - ejecutar el smoke completo desde `Self Check` hasta `Open Exports Folder`.
   - confirmar visualmente que no hay contaminación por objetos de jobs anteriores.
+
