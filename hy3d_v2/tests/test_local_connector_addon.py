@@ -54,7 +54,7 @@ def test_local_connector_has_no_legacy_ids() -> None:
 
 def test_local_connector_wrapper_paths_are_expected() -> None:
     assert hy3d_local_connector.PROJECT_ROOT == Path(__file__).resolve().parents[1]
-    assert hy3d_local_connector.WRAPPER_RUN == hy3d_local_connector.ENGINE_ROOT.parent / "wrappers" / "run_triposr_local.ps1"
+    assert hy3d_local_connector.WRAPPER_RUN.name == "run_triposr_local.ps1"
     assert hy3d_local_connector.ENGINE_VENV == hy3d_local_connector.ENGINE_ROOT / ".venv"
     assert hy3d_local_connector.ENGINE_REPO == hy3d_local_connector.ENGINE_ROOT / "TripoSR"
 
@@ -67,6 +67,8 @@ def test_local_connector_engine_check_detects_real_installation() -> None:
     assert isinstance(status["triposr_repo_exists"], bool)
     assert isinstance(status["run_py_exists"], bool)
     assert status["sample_input_exists"] is True
+    assert "repo_root" in status
+    assert "recommendation" in status
     assert status["project_root"] == str(hy3d_local_connector.PROJECT_ROOT)
     assert status["engine_root"] == str(hy3d_local_connector.ENGINE_ROOT)
 

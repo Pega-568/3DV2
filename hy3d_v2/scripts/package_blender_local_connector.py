@@ -16,6 +16,10 @@ def build_zip() -> Path:
         OUTPUT_ZIP.unlink()
     with zipfile.ZipFile(OUTPUT_ZIP, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.write(PACKAGE_ROOT / "__init__.py", "hy3d_local_connector/__init__.py")
+    with zipfile.ZipFile(OUTPUT_ZIP, "r") as archive:
+        names = archive.namelist()
+    if names != ["hy3d_local_connector/__init__.py"]:
+        raise RuntimeError(f"Unexpected add-on ZIP contents: {names}")
     return OUTPUT_ZIP
 
 
